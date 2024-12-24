@@ -8,12 +8,14 @@
 	let chainId: string = '';
 	let contractAddress: string = '';
 	let loading = false;
+	let canceling = false;
 	let progress = '';
 	let error: string | null = null;
 	let currentChainName: string = '';
 	let abortController: AbortController | null = null;
 	let contractInterface: ethers.Interface | null = null;
 	let assetIdMap: Map<string, string> = new Map();
+	let lastCheckedBlock: number | null = null;
 
 	// Create a writable store for transactions
 	const transactionStore: Writable<any[]> = writable([]);
@@ -377,6 +379,7 @@
 
 	async function fetchTransactions() {
 		loading = true;
+		canceling = false;
 		error = null;
 		
 		// Reset all stores
@@ -528,9 +531,14 @@
 					}
 					
 					// Check for rate limit errors
-					if (e?.message?.includes('rate') || e?.message?.includes('limit')) {
+					if (e?.message?.includes('rate') || 
+						e?.message?.includes('limit') || 
+						e?.message?.includes('429') ||
+						e?.status === 429 ||
+						e?.code === 429) {
 						console.log('Rate limit hit, increasing delay...');
 						retryDelay = Math.min(retryDelay * 2, 10000); // Double delay up to 10s
+						progress = `${progress} (Rate limited, waiting ${(retryDelay/1000).toFixed(1)}s...)`;
 						await new Promise(resolve => setTimeout(resolve, retryDelay));
 					} else {
 						// Other errors - reduce chunk size
@@ -549,17 +557,22 @@
 			progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
 			console.log('Fetch complete:', progress);
 			
+			// Update lastCheckedBlock
+			lastCheckedBlock = latestBlock;
+			
 		} catch (e: any) {
 			console.error('Error in fetchTransactions:', e);
 			error = e.message;
 		} finally {
 			loading = false;
+			canceling = false;
 			abortController = null;
 		}
 	}
 
 	function cancelFetch() {
 		if (abortController) {
+			canceling = true;
 			abortController.abort();
 		}
 	}
@@ -699,6 +712,169 @@
 		if (gas < 1000000) return `${(gas / 1000).toFixed(1)}k`;
 		return `${(gas / 1000000).toFixed(1)}M`;
 	}
+
+	async function refreshTransactions() {
+		if (!lastCheckedBlock) return;
+		
+		loading = true;
+		canceling = false;
+		error = null;
+		
+		// Create new abort controller
+		if (abortController) {
+			abortController.abort();
+		}
+		abortController = new AbortController();
+		
+		try {
+			// Setup provider
+			const chainlistResponse = await fetch(`https://chainid.network/chains.json`);
+			const chains = await chainlistResponse.json();
+			const chain = chains.find((c: any) => c.chainId === parseInt(chainId));
+			
+			if (!chain) {
+				throw new Error(`Chain ID ${chainId} not found`);
+			}
+			
+			const rpcUrl = chain.rpc[0];
+			const provider = new ethers.JsonRpcProvider(rpcUrl);
+			
+			progress = 'Getting latest block...';
+			const latestBlock = await provider.getBlockNumber();
+			console.log('Latest block:', latestBlock);
+			
+			if (latestBlock <= lastCheckedBlock) {
+				progress = 'Already up to date!';
+				return;
+			}
+			
+			// Search from latest block down to last checked block
+			let chunkSize = 100_000;
+			let consecutiveSuccesses = 0;
+			let consecutiveFailures = 0;
+			let retryDelay = 1000;
+			
+			for (let block = latestBlock; block > lastCheckedBlock && !abortController?.signal.aborted;) {
+				const fromBlock = Math.max(lastCheckedBlock + 1, block - chunkSize + 1);
+				progress = `Checking for new transactions in blocks ${fromBlock.toLocaleString()} to ${block.toLocaleString()}...`;
+				
+				try {
+					const logs = await provider.getLogs({
+						address: contractAddress,
+						fromBlock,
+						toBlock: block
+					});
+					
+					console.log(`Found ${logs.length} new logs in range ${fromBlock}-${block}`);
+					
+					// Sort logs by block number descending (most recent first)
+					const sortedLogs = [...logs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
+					
+					const txHashes = [...new Set(sortedLogs.map(log => log.transactionHash).filter(Boolean))];
+					const BATCH_SIZE = 20;
+					const batches = [];
+					for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
+						const batch = txHashes.slice(i, i + BATCH_SIZE);
+						batches.push(batch);
+					}
+
+					let processedCount = 0;
+					const totalToProcess = txHashes.length;
+
+					for (const batch of batches) {
+						let batchSuccess = false;
+						let batchRetries = 0;
+						let batchConsecutiveFailures = 0;
+						
+						while (!batchSuccess && batchRetries < 3 && !abortController?.signal.aborted) {
+							try {
+								progress = `Processing new transactions ${processedCount + 1}-${Math.min(processedCount + batch.length, totalToProcess)} of ${totalToProcess}...`;
+								const [txs, receipts] = await Promise.all([
+									Promise.all(batch.map(hash => provider.getTransaction(hash))),
+									Promise.all(batch.map(hash => provider.getTransactionReceipt(hash)))
+								]);
+								
+								txs.forEach((tx, i) => addTransaction(tx, receipts[i]));
+								
+								batchSuccess = true;
+								batchConsecutiveFailures = 0;
+								processedCount += batch.length;
+							} catch (e) {
+								console.warn(`Batch retry ${batchRetries + 1}/3 failed:`, e);
+								batchRetries++;
+								batchConsecutiveFailures++;
+								if (batchConsecutiveFailures >= 50) {
+									throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+								}
+								if (batchRetries < 3) {
+									await new Promise(resolve => setTimeout(resolve, retryDelay));
+									retryDelay = Math.min(retryDelay * 1.5, 10000);
+								}
+							}
+						}
+					}
+					
+					// Success for this chunk
+					consecutiveSuccesses++;
+					consecutiveFailures = 0;
+					retryDelay = Math.max(1000, retryDelay / 1.5);
+					
+					if (consecutiveSuccesses >= 2) {
+						const newChunkSize = Math.min(500_000, Math.floor(chunkSize * 1.5));
+						if (newChunkSize !== chunkSize) {
+							console.log(`Increasing chunk size to ${newChunkSize}`);
+							chunkSize = newChunkSize;
+							consecutiveSuccesses = 0;
+						}
+					}
+					
+					block = fromBlock - 1;
+					
+				} catch (e: any) {
+					console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
+					consecutiveFailures++;
+					consecutiveSuccesses = 0;
+					
+					if (consecutiveFailures >= 50) {
+						throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+					}
+					
+					if (e?.message?.includes('rate') || 
+						e?.message?.includes('limit') || 
+						e?.message?.includes('429') ||
+						e?.status === 429 ||
+						e?.code === 429) {
+						console.log('Rate limit hit, increasing delay...');
+						retryDelay = Math.min(retryDelay * 2, 10000);
+							progress = `${progress} (Rate limited, waiting ${(retryDelay/1000).toFixed(1)}s...)`;
+						await new Promise(resolve => setTimeout(resolve, retryDelay));
+					} else {
+						const reduction = consecutiveFailures > 2 ? 4 : 2;
+						chunkSize = Math.max(1000, Math.floor(chunkSize / reduction));
+						console.log(`Reducing chunk size to ${chunkSize} after ${consecutiveFailures} failures`);
+					}
+					
+					continue;
+				}
+			}
+			
+			// Update lastCheckedBlock
+			lastCheckedBlock = latestBlock;
+			
+			// Update final progress
+			const txCount = $transactionStore.length;
+			progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
+			console.log('Refresh complete:', progress);
+			
+		} catch (e: any) {
+			console.error('Error in refreshTransactions:', e);
+			error = e.message;
+		} finally {
+			loading = false;
+			canceling = false;
+			abortController = null;
+		}
+	}
 </script>
 
 <div class="container mx-auto p-4 space-y-8">
@@ -722,7 +898,7 @@
 									<line x1="12" y1="17" x2="12.01" y2="17"></line>
 								</svg>
 							</div>
-							<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+							<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 								<a href="https://chainlist.org" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
 									EVM Chain IDs can be found at chainlist.org
 								</a>
@@ -752,7 +928,7 @@
 									<line x1="12" y1="17" x2="12.01" y2="17"></line>
 								</svg>
 							</div>
-							<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+							<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 								<a href="https://docs.stork.network/resources/contract-addresses/evm" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
 									Stork contract addresses can be found in the Stork docs 
 								</a>
@@ -775,8 +951,27 @@
 					{loading ? 'Loading...' : 'Fetch Transactions'}
 				</button>
 				{#if loading}
-					<button type="button" class="btn variant-filled-error" on:click={cancelFetch}>
-						Cancel
+					<button type="button" class="btn variant-filled-error" disabled={canceling} on:click={cancelFetch}>
+						{#if canceling}
+							<div class="flex items-center gap-2">
+								<div class="spinner-border !w-4 !h-4 !border-2"></div>
+								<span>Canceling...</span>
+							</div>
+						{:else}
+							Cancel
+						{/if}
+					</button>
+				{:else if lastCheckedBlock !== null}
+					<button type="button" class="btn variant-filled-secondary" on:click={refreshTransactions}>
+						<div class="flex items-center gap-2">
+							<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M21 2v6h-6"></path>
+								<path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+								<path d="M3 22v-6h6"></path>
+								<path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+							</svg>
+							<span>Check for New</span>
+						</div>
 					</button>
 				{/if}
 			</div>
@@ -787,7 +982,12 @@
 		<div class="card p-4">
 			<div class="flex items-center space-x-4">
 				<div class="spinner-border" role="status"></div>
-				<span>{progress}</span>
+				<div class="space-y-1">
+					<div>{progress}</div>
+					{#if progress.includes('Rate limited')}
+						<div class="text-warning-500">⚠️ Rate limit hit, slowing down requests...</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -949,7 +1149,7 @@
 												<line x1="12" y1="17" x2="12.01" y2="17"></line>
 											</svg>
 										</div>
-										<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+										<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 											Statistics calculated over the selected time period
 										</div>
 									</div>
