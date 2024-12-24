@@ -23,6 +23,14 @@
 		timestamp: number;
 		value: number;
 		from: string;
+		txHash: string;
+		gasUsed: number;  // Gas attributed to this specific update
+	}
+
+	interface UpdaterGasStats {
+		totalGas: number;
+		updateCount: number;
+		averageGas: number;
 	}
 
 	interface AssetStats {
@@ -31,6 +39,13 @@
 		updateCount: number;
 		uniqueUpdaters: Set<string>;
 		updates: AssetUpdate[];
+		totalGas: number;
+		updaterGasStats: Map<string, UpdaterGasStats>;
+	}
+
+	interface AssetDetails {
+		shown: boolean;
+		showHashes: boolean;
 	}
 
 	// Create stores for our analytics
@@ -39,11 +54,41 @@
 		totalAssets: number;
 		totalUpdates: number;
 		totalUniqueUpdaters: Set<string>;
+		totalGas: number;
+		updaterGasStats: Map<string, UpdaterGasStats>;
 	}> = writable({
 		totalAssets: 0,
 		totalUpdates: 0,
-		totalUniqueUpdaters: new Set()
+		totalUniqueUpdaters: new Set(),
+		totalGas: 0,
+		updaterGasStats: new Map()
 	});
+
+	// Store for tracking expanded details
+	const showDetails = writable({
+		network: false,
+		assets: new Map<string, AssetDetails>()
+	});
+
+	// Reset all stores
+	function resetStores() {
+		transactionStore.set([]);
+		assetStatsStore.set(new Map());
+		aggregateStatsStore.set({
+			totalAssets: 0,
+			totalUpdates: 0,
+			totalUniqueUpdaters: new Set(),
+			totalGas: 0,
+			updaterGasStats: new Map()
+		});
+		showDetails.set({
+			network: false,
+			assets: new Map<string, AssetDetails>()
+		});
+	}
+
+	// Selected timeframe for frequency calculation
+	let selectedTimeframe: 'day' | 'week' | 'month' | 'year' | 'all' = 'day';
 
 	// Fetch ABI from Arbitrum Sepolia implementation contract
 	async function fetchABI() {
@@ -186,6 +231,10 @@
 	function processTransactionForStats(tx: any) {
 		if (!tx.decodedInput?.updates) return;
 		
+		const updatesCount = tx.decodedInput.updates.length;
+		const gasUsed = tx.receipt?.gasUsed ? Number(tx.receipt.gasUsed) : 0; // Get gas from receipt
+		const gasPerUpdate = gasUsed / updatesCount; // Split gas equally among updates
+		
 		assetStatsStore.update(statsMap => {
 			tx.decodedInput.updates.forEach((update: any) => {
 				const assetId = update.assetName;
@@ -194,15 +243,31 @@
 					updateCount: 0,
 					uniqueUpdaters: new Set<string>(),
 					updates: [] as AssetUpdate[],
-					lastUpdate: null
+					lastUpdate: null,
+					totalGas: 0,
+					updaterGasStats: new Map()
 				};
 				
 				const newUpdate: AssetUpdate = {
 					timestamp: Number(update.rawTimestamp) / 1_000_000, // Convert to ms
 					value: Number(update.rawValue) / 1e18,
-					from: tx.from
+					from: tx.from,
+					txHash: tx.hash,
+					gasUsed: gasPerUpdate
 				};
 				
+				// Update gas stats for this updater
+				const updaterStats = currentStats.updaterGasStats.get(tx.from) || {
+					totalGas: 0,
+					updateCount: 0,
+					averageGas: 0
+				};
+				updaterStats.totalGas += gasPerUpdate;
+				updaterStats.updateCount++;
+				updaterStats.averageGas = updaterStats.totalGas / updaterStats.updateCount;
+				currentStats.updaterGasStats.set(tx.from, updaterStats);
+				
+				currentStats.totalGas += gasPerUpdate;
 				currentStats.updateCount++;
 				currentStats.uniqueUpdaters.add(tx.from);
 				currentStats.updates.push(newUpdate);
@@ -223,6 +288,19 @@
 			tx.decodedInput.updates.forEach((update: any) => {
 				stats.totalUpdates++;
 				stats.totalUniqueUpdaters.add(tx.from);
+				stats.totalGas += gasUsed / updatesCount;
+				
+				// Update gas stats for this updater
+				const updaterStats = stats.updaterGasStats.get(tx.from) || {
+					totalGas: 0,
+					updateCount: 0,
+					averageGas: 0
+				};
+				updaterStats.totalGas += gasUsed / updatesCount;
+				updaterStats.updateCount++;
+				updaterStats.averageGas = updaterStats.totalGas / updaterStats.updateCount;
+				
+				stats.updaterGasStats.set(tx.from, updaterStats);
 			});
 			return stats;
 		});
@@ -271,7 +349,7 @@
 	}
 
 	// Add a transaction to the store
-	function addTransaction(tx: any) {
+	function addTransaction(tx: any, receipt: any) {
 		if (!tx) return;
 		
 		// Only keep creation and incoming transactions
@@ -285,6 +363,7 @@
 					if (!txs.find(t => t.hash === tx.hash)) {
 						const enrichedTx = {
 							...tx,
+							receipt,
 							decodedInput
 						};
 						processTransactionForStats(enrichedTx);
@@ -301,13 +380,7 @@
 		error = null;
 		
 		// Reset all stores
-		transactionStore.set([]);
-		assetStatsStore.set(new Map());
-		aggregateStatsStore.set({
-			totalAssets: 0,
-			totalUpdates: 0,
-			totalUniqueUpdaters: new Set()
-		});
+		resetStores();
 		
 		// Reset other state
 		currentChainName = '';
@@ -395,7 +468,7 @@
 								]);
 								
 								// Add transactions to store as they come in
-								txs.forEach(addTransaction);
+								txs.forEach((tx, i) => addTransaction(tx, receipts[i]));
 								
 								// Check for contract creation
 								for (const receipt of receipts) {
@@ -491,9 +564,124 @@
 		}
 	}
 
-	// Selected timeframe for frequency calculation
-	let selectedTimeframe: 'day' | 'week' | 'month' | 'year' | 'all' = 'day';
-	
+	// Format time ago
+	function formatTimeAgo(timestamp: number): string {
+		const now = Date.now();
+		const diff = now - timestamp;
+		
+		const days = Math.floor(diff / (24 * 60 * 60 * 1000));
+		const hours = Math.floor((diff % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+		const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+		const seconds = Math.floor((diff % (60 * 1000)) / 1000);
+		const ms = diff % 1000;
+		
+		const parts = [];
+		if (days > 0) parts.push(`${days}d`);
+		if (hours > 0) parts.push(`${hours}h`);
+		if (minutes > 0) parts.push(`${minutes}m`);
+		if (seconds > 0) parts.push(`${seconds}s`);
+		if (ms > 0 && parts.length === 0) parts.push(`${ms}ms`);
+		
+		return parts.join(' ') + ' ago';
+	}
+
+	// Calculate comprehensive update statistics
+	function calculateUpdateStats(updates: AssetUpdate[], timeframe: 'day' | 'week' | 'month' | 'year' | 'all'): {
+		averageFrequency: number;
+		medianFrequency: number;
+		updatesPerDay: number;
+		maxGap: number;
+		minGap: number;
+	} {
+		if (updates.length < 2) return {
+			averageFrequency: 0,
+			medianFrequency: 0,
+			updatesPerDay: 0,
+			maxGap: 0,
+			minGap: 0
+		};
+		
+		const now = Date.now();
+		let cutoff = now;
+		let timeframeMs = 0;
+		
+		switch (timeframe) {
+			case 'day':
+				timeframeMs = 24 * 60 * 60 * 1000;
+				cutoff = now - timeframeMs;
+				break;
+			case 'week':
+				timeframeMs = 7 * 24 * 60 * 60 * 1000;
+				cutoff = now - timeframeMs;
+				break;
+			case 'month':
+				timeframeMs = 30 * 24 * 60 * 60 * 1000;
+				cutoff = now - timeframeMs;
+				break;
+			case 'year':
+				timeframeMs = 365 * 24 * 60 * 60 * 1000;
+				cutoff = now - timeframeMs;
+				break;
+		}
+		
+		const relevantUpdates = timeframe === 'all' 
+			? updates 
+			: updates.filter(u => u.timestamp >= cutoff);
+		
+		if (relevantUpdates.length < 2) return {
+			averageFrequency: 0,
+			medianFrequency: 0,
+			updatesPerDay: 0,
+			maxGap: 0,
+			minGap: 0
+		};
+		
+		// Sort updates by timestamp
+		const sortedUpdates = [...relevantUpdates].sort((a, b) => a.timestamp - b.timestamp);
+		
+		// Calculate gaps between updates
+		const gaps: number[] = [];
+		for (let i = 1; i < sortedUpdates.length; i++) {
+			gaps.push(sortedUpdates[i].timestamp - sortedUpdates[i-1].timestamp);
+		}
+		
+		// Calculate statistics
+		const maxGap = Math.max(...gaps);
+		const minGap = Math.min(...gaps);
+		
+		// Calculate median gap
+		const sortedGaps = [...gaps].sort((a, b) => a - b);
+		const medianFrequency = sortedGaps[Math.floor(sortedGaps.length / 2)];
+		
+		// Calculate updates per day over the timeframe
+		const timeframe_ms = timeframe === 'all'
+			? sortedUpdates[sortedUpdates.length - 1].timestamp - sortedUpdates[0].timestamp
+			: timeframeMs;
+		
+		const updatesPerDay = (relevantUpdates.length / timeframe_ms) * (24 * 60 * 60 * 1000);
+		
+		return {
+			averageFrequency: timeframe_ms / relevantUpdates.length,
+			medianFrequency,
+			updatesPerDay,
+			maxGap,
+			minGap
+		};
+	}
+
+	// Format frequency stats to human readable
+	function formatFrequencyStats(stats: ReturnType<typeof calculateUpdateStats>): string {
+		if (stats.averageFrequency === 0) return 'N/A';
+		
+		return `
+			Avg: ${formatFrequency(stats.averageFrequency)}
+			Median: ${formatFrequency(stats.medianFrequency)}
+			Updates/day: ${stats.updatesPerDay.toFixed(1)}
+			Max gap: ${formatFrequency(stats.maxGap)}
+			Min gap: ${formatFrequency(stats.minGap)}
+		`.trim();
+	}
+
 	// Format frequency to human readable
 	function formatFrequency(ms: number): string {
 		if (ms === 0) return 'N/A';
@@ -502,6 +690,14 @@
 		if (seconds < 3600) return `${(seconds / 60).toFixed(1)} minutes`;
 		if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} hours`;
 		return `${(seconds / 86400).toFixed(1)} days`;
+	}
+
+	// Format gas to human readable
+	function formatGas(gas: number): string {
+		if (gas === 0) return 'N/A';
+		if (gas < 1000) return `${gas.toFixed(0)}`;
+		if (gas < 1000000) return `${(gas / 1000).toFixed(1)}k`;
+		return `${(gas / 1000000).toFixed(1)}M`;
 	}
 </script>
 
@@ -614,19 +810,78 @@
 		<div class="space-y-8">
 			<!-- Aggregate Stats -->
 			<div class="card p-4">
-				<h2 class="h2 mb-4">Network Overview</h2>
+				<div class="flex justify-between items-center mb-4">
+					<h3 class="h3">Network Overview</h3>
+					<button class="btn btn-sm variant-ghost-primary" on:click={() => $showDetails.network = !$showDetails.network}>
+						{$showDetails.network ? 'Hide' : 'Show'} Details
+					</button>
+				</div>
 				<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+					<!-- Total Assets -->
 					<div class="card variant-soft p-4">
 						<div class="text-2xl font-bold">{$assetStatsStore.size}</div>
 						<div class="text-sm">Total Assets</div>
+						{#if $showDetails.network}
+							<div class="mt-4 space-y-1">
+								<div class="font-semibold mb-2">Asset List:</div>
+								<div class="max-h-48 overflow-y-auto">
+									{#each [...$assetStatsStore.keys()] as assetName, i}
+										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'}">{assetName}</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
 					</div>
+
+					<!-- Total Updates -->
 					<div class="card variant-soft p-4">
 						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUpdates}</div>
 						<div class="text-sm">Total Updates</div>
+						<div class="text-sm text-surface-400">
+							{formatGas($aggregateStatsStore.totalGas)} gas used
+						</div>
+						{#if $showDetails.network}
+							<div class="mt-4 space-y-2">
+								<div class="font-semibold">Transaction Details:</div>
+								<div class="p-1 rounded bg-surface-100/50">
+									Unique Transactions: {new Set($transactionStore.map(tx => tx.hash)).size}
+								</div>
+								<div class="max-h-48 overflow-y-auto">
+									{#each $transactionStore as tx, i}
+										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+											{tx.hash}
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
 					</div>
+
+					<!-- Unique Updaters -->
 					<div class="card variant-soft p-4">
 						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUniqueUpdaters.size}</div>
 						<div class="text-sm">Unique Updaters</div>
+						<div class="text-sm text-surface-400">
+							{formatGas($aggregateStatsStore.totalGas / $aggregateStatsStore.totalUniqueUpdaters.size)} gas/updater
+						</div>
+						{#if $showDetails.network}
+							<div class="mt-4 space-y-1">
+								<div class="font-semibold mb-2">Updater List:</div>
+								<div class="max-h-48 overflow-y-auto">
+									{#each [...$aggregateStatsStore.totalUniqueUpdaters] as address, i}
+										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+											<div>{address}</div>
+											{#if $aggregateStatsStore.updaterGasStats.get(address)}
+												<div class="text-surface-400">
+													Gas: {formatGas($aggregateStatsStore.updaterGasStats.get(address)?.totalGas || 0)}
+													({formatGas($aggregateStatsStore.updaterGasStats.get(address)?.averageGas || 0)}/update)
+												</div>
+											{/if}
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
 					</div>
 				</div>
 			</div>
@@ -654,7 +909,19 @@
 					<div class="card p-4">
 						<div class="flex items-center justify-between mb-4">
 							<h3 class="h3">{stats.assetName}</h3>
-							<div class="badge variant-filled">{stats.updateCount} updates</div>
+							<div class="flex items-center gap-4">
+								<div class="badge variant-filled">{stats.updateCount} updates</div>
+								<button class="btn btn-sm variant-ghost-primary" on:click={() => {
+									showDetails.update(details => {
+										const newAssets = new Map(details.assets);
+										const currentDetails = newAssets.get(assetId) || { shown: false, showHashes: false };
+										newAssets.set(assetId, { ...currentDetails, shown: !currentDetails.shown });
+										return { ...details, assets: newAssets };
+									});
+								}}>
+									{$showDetails.assets.get(assetId)?.shown ? 'Hide' : 'Show'} Details
+								</button>
+							</div>
 						</div>
 						
 						<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -664,6 +931,7 @@
 								{#if stats.lastUpdate}
 									<div>Value: {stats.lastUpdate.value}</div>
 									<div class="text-sm">{new Date(stats.lastUpdate.timestamp).toLocaleString()}</div>
+									<div class="text-sm text-surface-400">{formatTimeAgo(stats.lastUpdate.timestamp)}</div>
 								{:else}
 									<div>No updates yet</div>
 								{/if}
@@ -672,7 +940,7 @@
 							<!-- Update Frequency -->
 							<div class="card variant-soft p-4">
 								<div class="text-sm font-semibold mb-2 flex items-center gap-2">
-									<span>Average Update Frequency</span>
+									<span>Update Statistics</span>
 									<div class="relative group">
 										<div class="text-surface-500 cursor-help">
 											<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -682,23 +950,85 @@
 											</svg>
 										</div>
 										<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
-											Calculated as average time between updates from first to last update in the selected period
+											Statistics calculated over the selected time period
 										</div>
 									</div>
 								</div>
-								<div>{formatFrequency(calculateFrequency(stats.updates, selectedTimeframe))}</div>
+								<div class="text-sm space-y-1">
+									{#if stats.updates.length > 0}
+										{@const updateStats = calculateUpdateStats(stats.updates, selectedTimeframe)}
+										<div>Updates/day: {updateStats.updatesPerDay.toFixed(1)}</div>
+										<div>Average gap: {formatFrequency(updateStats.averageFrequency)}</div>
+										<div>Median gap: {formatFrequency(updateStats.medianFrequency)}</div>
+										<div>Min gap: {formatFrequency(updateStats.minGap)}</div>
+										<div>Max gap: {formatFrequency(updateStats.maxGap)}</div>
+									{:else}
+										<div>No updates in selected timeframe</div>
+									{/if}
+								</div>
 							</div>
 							
 							<!-- Unique Updaters -->
 							<div class="card variant-soft p-4">
 								<div class="text-sm font-semibold mb-2">Unique Updaters</div>
 								<div>{stats.uniqueUpdaters.size}</div>
+								{#if $showDetails.assets.get(assetId)?.shown}
+									<div class="mt-4 space-y-1 max-h-48 overflow-y-auto text-sm">
+										{#each [...stats.uniqueUpdaters] as address, i}
+											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+												{address}
+											</div>
+										{/each}
+									</div>
+								{/if}
 							</div>
 							
 							<!-- Update Count -->
 							<div class="card variant-soft p-4">
 								<div class="text-sm font-semibold mb-2">Total Updates</div>
 								<div>{stats.updateCount}</div>
+								<div class="text-sm text-surface-400">
+									{formatGas(stats.totalGas)} gas used
+									({formatGas(stats.totalGas / stats.updateCount)}/update)
+								</div>
+								{#if $showDetails.assets.get(assetId)?.shown}
+									<div class="mt-4 space-y-2">
+										<div class="flex justify-between items-center">
+											<div class="text-sm font-semibold">Gas by Updater:</div>
+											<button class="btn btn-sm variant-glass-primary" on:click={() => {
+												showDetails.update(details => {
+													const newAssets = new Map(details.assets);
+													const currentDetails = newAssets.get(assetId) || { shown: true, showHashes: false };
+													newAssets.set(assetId, { ...currentDetails, showHashes: !currentDetails.showHashes });
+													return { ...details, assets: newAssets };
+												});
+											}}>
+												Show {$showDetails.assets.get(assetId)?.showHashes ? 'Values' : 'Tx Hashes'}
+											</button>
+										</div>
+										<div class="max-h-48 overflow-y-auto">
+											{#if $showDetails.assets.get(assetId)?.showHashes}
+												{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
+													<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+														{update.txHash}
+														<div class="text-surface-400">Gas: {formatGas(update.gasUsed)}</div>
+													</div>
+												{/each}
+											{:else}
+												{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
+													<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+														<div>Value: {update.value}</div>
+														<div>{new Date(update.timestamp).toLocaleString()}</div>
+														<div class="text-surface-400">
+															{formatTimeAgo(update.timestamp)}
+															• Gas: {formatGas(update.gasUsed)}
+														</div>
+													</div>
+												{/each}
+											{/if}
+										</div>
+									</div>
+								{/if}
 							</div>
 						</div>
 					</div>
@@ -717,3 +1047,4 @@
 		@apply w-8 h-8 border-4 border-primary-500 border-r-transparent rounded-full animate-spin;
 	}
 </style>
+
