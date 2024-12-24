@@ -20,9 +20,10 @@
 	let valueSearchQuery = '';
 	const assetValues: Writable<Map<string, { value: number; timestamp: number; found: boolean }>> = writable(new Map());
 	let scanningValues = false;
+	const scanProgress = writable('');
 	const sortState = writable({
-		column: null as 'asset' | 'status' | 'value' | 'timestamp' | null,
-		direction: 'asc' as 'asc' | 'desc'
+		column: 'status' as 'asset' | 'status' | 'value' | 'timestamp' | null,
+		direction: 'desc' as 'asc' | 'desc'  // desc will show Found first
 	});
 
 	// Create a writable store for transactions
@@ -423,150 +424,159 @@
 			progress = 'Fetching contract ABI...';
 			await fetchABI();
 			
-			// Setup provider
-			const rpcUrl = chain.rpc[0];
-			const provider = new ethers.JsonRpcProvider(rpcUrl);
-			
-			progress = 'Getting latest block...';
-			const latestBlock = await provider.getBlockNumber();
-			console.log('Latest block:', latestBlock);
-			
-			let chunkSize = 100_000;
-			let consecutiveSuccesses = 0;
-			let consecutiveFailures = 0;
-			let foundCreation = false;
-			let retryDelay = 1000; // Start with 1 second delay
-			
-			// Search backwards in chunks until we find the contract creation
-			for (let block = latestBlock; block > 0 && !abortController?.signal.aborted;) {
-				const fromBlock = Math.max(0, block - chunkSize + 1); // +1 to ensure overlap
-				progress = `Fetching logs for blocks ${fromBlock.toLocaleString()} to ${block.toLocaleString()} of ${latestBlock.toLocaleString()}...`;
-				
-				try {
-					const logs = await provider.getLogs({
-						address: contractAddress,
-						fromBlock,
-						toBlock: block
-					});
+			// Start both transaction fetching and value scanning in parallel
+			const [txResult] = await Promise.all([
+				(async () => {
+					// Setup provider
+					const rpcUrl = chain.rpc[0];
+					const provider = new ethers.JsonRpcProvider(rpcUrl);
 					
-					console.log(`Found ${logs.length} logs in range ${fromBlock}-${block}`);
+					progress = 'Getting latest block...';
+					const latestBlock = await provider.getBlockNumber();
+					console.log('Latest block:', latestBlock);
 					
-					// Sort logs by block number descending (most recent first)
-					const sortedLogs = [...logs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
+					let chunkSize = 100_000;
+					let consecutiveSuccesses = 0;
+					let consecutiveFailures = 0;
+					let foundCreation = false;
+					let retryDelay = 1000; // Start with 1 second delay
 					
-					const txHashes = [...new Set(sortedLogs.map(log => log.transactionHash).filter(Boolean))];
-					const BATCH_SIZE = 20; // Keep small to avoid overwhelming RPC
-					const batches = [];
-					for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
-						const batch = txHashes.slice(i, i + BATCH_SIZE);
-						batches.push(batch);
-					}
-
-					let processedCount = 0;
-					const totalToProcess = txHashes.length;
-
-					for (const batch of batches) {
-						let batchSuccess = false;
-						let batchRetries = 0;
-						let batchConsecutiveFailures = 0;
+					// Search backwards in chunks until we find the contract creation
+					for (let block = latestBlock; block > 0 && !abortController?.signal.aborted;) {
+						const fromBlock = Math.max(0, block - chunkSize + 1); // +1 to ensure overlap
+						progress = `Fetching logs for blocks ${fromBlock.toLocaleString()} to ${block.toLocaleString()} of ${latestBlock.toLocaleString()}...`;
 						
-						while (!batchSuccess && batchRetries < 3 && !abortController?.signal.aborted) {
-							try {
-								progress = `Processing transactions ${processedCount + 1}-${Math.min(processedCount + batch.length, totalToProcess)} of ${totalToProcess}...`;
-								const [txs, receipts] = await Promise.all([
-									Promise.all(batch.map(hash => provider.getTransaction(hash))),
-									Promise.all(batch.map(hash => provider.getTransactionReceipt(hash)))
-								]);
+						try {
+							const logs = await provider.getLogs({
+								address: contractAddress,
+								fromBlock,
+								toBlock: block
+							});
+							
+							console.log(`Found ${logs.length} logs in range ${fromBlock}-${block}`);
+							
+							// Sort logs by block number descending (most recent first)
+							const sortedLogs = [...logs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
+							
+							const txHashes = [...new Set(sortedLogs.map(log => log.transactionHash).filter(Boolean))];
+							const BATCH_SIZE = 20; // Keep small to avoid overwhelming RPC
+							const batches = [];
+							for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
+								const batch = txHashes.slice(i, i + BATCH_SIZE);
+								batches.push(batch);
+							}
+
+							let processedCount = 0;
+							const totalToProcess = txHashes.length;
+
+							for (const batch of batches) {
+								let batchSuccess = false;
+								let batchRetries = 0;
+								let batchConsecutiveFailures = 0;
 								
-								// Add transactions to store as they come in
-								txs.forEach((tx, i) => addTransaction(tx, receipts[i]));
-								
-								// Check for contract creation
-								for (const receipt of receipts) {
-									if (receipt?.contractAddress?.toLowerCase() === contractAddress.toLowerCase()) {
-										console.log('Found contract creation at block:', receipt.blockNumber);
-										foundCreation = true;
-										break;
+								while (!batchSuccess && batchRetries < 3 && !abortController?.signal.aborted) {
+									try {
+										progress = `Processing transactions ${processedCount + 1}-${Math.min(processedCount + batch.length, totalToProcess)} of ${totalToProcess}...`;
+										const [txs, receipts] = await Promise.all([
+											Promise.all(batch.map(hash => provider.getTransaction(hash))),
+											Promise.all(batch.map(hash => provider.getTransactionReceipt(hash)))
+										]);
+										
+										// Add transactions to store as they come in
+										txs.forEach((tx, i) => addTransaction(tx, receipts[i]));
+										
+										// Check for contract creation
+										for (const receipt of receipts) {
+											if (receipt?.contractAddress?.toLowerCase() === contractAddress.toLowerCase()) {
+												console.log('Found contract creation at block:', receipt.blockNumber);
+												foundCreation = true;
+												break;
+											}
+										}
+										
+										batchSuccess = true;
+										batchConsecutiveFailures = 0;
+										processedCount += batch.length;
+									} catch (e) {
+										console.warn(`Batch retry ${batchRetries + 1}/3 failed:`, e);
+										batchRetries++;
+										batchConsecutiveFailures++;
+										if (batchConsecutiveFailures >= 50) {
+											throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+										}
+										if (batchRetries < 3) {
+											await new Promise(resolve => setTimeout(resolve, retryDelay));
+											retryDelay = Math.min(retryDelay * 1.5, 10000); // Exponential backoff up to 10s
+										}
 									}
 								}
 								
-								batchSuccess = true;
-								batchConsecutiveFailures = 0;
-								processedCount += batch.length;
-							} catch (e) {
-								console.warn(`Batch retry ${batchRetries + 1}/3 failed:`, e);
-								batchRetries++;
-								batchConsecutiveFailures++;
-								if (batchConsecutiveFailures >= 50) {
-									throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
-								}
-								if (batchRetries < 3) {
-									await new Promise(resolve => setTimeout(resolve, retryDelay));
-									retryDelay = Math.min(retryDelay * 1.5, 10000); // Exponential backoff up to 10s
+								if (foundCreation) break;
+							}
+							
+							if (foundCreation) break;
+							
+							// Success for this chunk
+							consecutiveSuccesses++;
+							consecutiveFailures = 0;
+							retryDelay = Math.max(1000, retryDelay / 1.5); // Reduce delay on success
+							
+							if (consecutiveSuccesses >= 2) {
+								const newChunkSize = Math.min(500_000, Math.floor(chunkSize * 1.5));
+								if (newChunkSize !== chunkSize) {
+									console.log(`Increasing chunk size to ${newChunkSize}`);
+									chunkSize = newChunkSize;
+									consecutiveSuccesses = 0;
 								}
 							}
-						}
-						
-						if (foundCreation) break;
-					}
-					
-					if (foundCreation) break;
-					
-					// Success for this chunk
-					consecutiveSuccesses++;
-					consecutiveFailures = 0;
-					retryDelay = Math.max(1000, retryDelay / 1.5); // Reduce delay on success
-					
-					if (consecutiveSuccesses >= 2) {
-						const newChunkSize = Math.min(500_000, Math.floor(chunkSize * 1.5));
-						if (newChunkSize !== chunkSize) {
-							console.log(`Increasing chunk size to ${newChunkSize}`);
-							chunkSize = newChunkSize;
+							
+							// Move to next chunk, ensuring we don't skip any blocks
+							block = fromBlock - 1;
+							
+						} catch (e: any) {
+							console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
+							consecutiveFailures++;
 							consecutiveSuccesses = 0;
+							
+							if (consecutiveFailures >= 50) {
+								throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+							}
+							
+							// Check for rate limit errors
+							if (e?.message?.includes('rate') || 
+								e?.message?.includes('limit') || 
+								e?.message?.includes('429') ||
+								e?.status === 429 ||
+								e?.code === 429) {
+								console.log('Rate limit hit, increasing delay...');
+								retryDelay = Math.min(retryDelay * 2, 10000); // Double delay up to 10s
+								progress = `${progress} (Rate limited, waiting ${(retryDelay/1000).toFixed(1)}s...)`;
+								await new Promise(resolve => setTimeout(resolve, retryDelay));
+							} else {
+								// Other errors - reduce chunk size
+								const reduction = consecutiveFailures > 2 ? 4 : 2;
+								chunkSize = Math.max(1000, Math.floor(chunkSize / reduction));
+								console.log(`Reducing chunk size to ${chunkSize} after ${consecutiveFailures} failures`);
+							}
+							
+							// Don't move the block pointer - retry the same chunk
+							continue;
 						}
 					}
 					
-					// Move to next chunk, ensuring we don't skip any blocks
-					block = fromBlock - 1;
+					// Update final progress
+					const txCount = $transactionStore.length;
+					progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
+					console.log('Fetch complete:', progress);
 					
-				} catch (e: any) {
-					console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
-					consecutiveFailures++;
-					consecutiveSuccesses = 0;
-					
-					if (consecutiveFailures >= 50) {
-						throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
-					}
-					
-					// Check for rate limit errors
-					if (e?.message?.includes('rate') || 
-						e?.message?.includes('limit') || 
-						e?.message?.includes('429') ||
-						e?.status === 429 ||
-						e?.code === 429) {
-						console.log('Rate limit hit, increasing delay...');
-						retryDelay = Math.min(retryDelay * 2, 10000); // Double delay up to 10s
-						progress = `${progress} (Rate limited, waiting ${(retryDelay/1000).toFixed(1)}s...)`;
-						await new Promise(resolve => setTimeout(resolve, retryDelay));
-					} else {
-						// Other errors - reduce chunk size
-						const reduction = consecutiveFailures > 2 ? 4 : 2;
-						chunkSize = Math.max(1000, Math.floor(chunkSize / reduction));
-						console.log(`Reducing chunk size to ${chunkSize} after ${consecutiveFailures} failures`);
-					}
-					
-					// Don't move the block pointer - retry the same chunk
-					continue;
-				}
-			}
-			
-			// Update final progress
-			const txCount = $transactionStore.length;
-			progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
-			console.log('Fetch complete:', progress);
+					return latestBlock;
+				})(),
+				// Start value scanning immediately
+				scanValues()
+			]);
 			
 			// Update lastCheckedBlock
-			lastCheckedBlock = latestBlock;
+			lastCheckedBlock = txResult;
 			
 		} catch (e: any) {
 			console.error('Error in fetchTransactions:', e);
@@ -869,6 +879,9 @@
 			// Update lastCheckedBlock
 			lastCheckedBlock = latestBlock;
 			
+			// Scan values after refreshing transactions
+			await scanValues();
+			
 			// Update final progress
 			const txCount = $transactionStore.length;
 			progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
@@ -889,7 +902,7 @@
 		if (!contractAddress || !chainId) return;
 		
 		scanningValues = true;
-		error = null;
+		scanProgress.set('Preparing to scan values...');
 		
 		try {
 			// Setup provider
@@ -957,19 +970,18 @@
 				});
 				
 				processedCount += batch.length;
-				progress = `Scanning values... ${processedCount}/${totalAssets} assets processed`;
+				scanProgress.set(`Scanning values... ${processedCount}/${totalAssets} assets processed`);
 				
 				// Add a small delay between batches to avoid rate limits
 				await new Promise(resolve => setTimeout(resolve, 100));
 			}
 			
-			progress = `Scanned ${processedCount} assets`;
-			
 		} catch (e: any) {
 			console.error('Error scanning values:', e);
-			error = e.message;
+			if (!error) error = e.message;  // Only set error if no other error exists
 		} finally {
 			scanningValues = false;
+			scanProgress.set('');
 		}
 	}
 
@@ -989,22 +1001,44 @@
 					comparison = nameA.localeCompare(nameB);
 					break;
 				case 'status':
-					if (!valueA && !valueB) comparison = 0;
-					else if (!valueA) comparison = 1;
-					else if (!valueB) comparison = -1;
-					else comparison = Number(valueA.found) - Number(valueB.found);
+					// Not scanned (-1), Not found (0), Found (1)
+					const statusA = !valueA ? -1 : (valueA.found ? 1 : 0);
+					const statusB = !valueB ? -1 : (valueB.found ? 1 : 0);
+					comparison = statusA - statusB;
+					// If status is the same, sort by asset name
+					if (comparison === 0) {
+						comparison = nameA.localeCompare(nameB);
+					}
 					break;
 				case 'value':
-					if (!valueA?.found && !valueB?.found) comparison = 0;
-					else if (!valueA?.found) comparison = 1;
-					else if (!valueB?.found) comparison = -1;
-					else comparison = valueA.value - valueB.value;
+					if (!valueA?.found && !valueB?.found) {
+						comparison = nameA.localeCompare(nameB);
+					} else if (!valueA?.found) {
+						comparison = 1;  // Move not found to bottom
+					} else if (!valueB?.found) {
+						comparison = -1; // Move not found to bottom
+					} else {
+						comparison = valueA.value - valueB.value;
+						// If values are equal, sort by asset name
+						if (comparison === 0) {
+							comparison = nameA.localeCompare(nameB);
+						}
+					}
 					break;
 				case 'timestamp':
-					if (!valueA?.found && !valueB?.found) comparison = 0;
-					else if (!valueA?.found) comparison = 1;
-					else if (!valueB?.found) comparison = -1;
-					else comparison = valueA.timestamp - valueB.timestamp;
+					if (!valueA?.found && !valueB?.found) {
+						comparison = nameA.localeCompare(nameB);
+					} else if (!valueA?.found) {
+						comparison = 1;  // Move not found to bottom
+					} else if (!valueB?.found) {
+						comparison = -1; // Move not found to bottom
+					} else {
+						comparison = valueA.timestamp - valueB.timestamp;
+						// If timestamps are equal, sort by asset name
+						if (comparison === 0) {
+							comparison = nameA.localeCompare(nameB);
+						}
+					}
 					break;
 			}
 			
@@ -1085,7 +1119,7 @@
 									<circle cx="12" cy="12" r="10"></circle>
 									<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
 									<line x1="12" y1="17" x2="12.01" y2="17"></line>
-								</svg>
+			</svg>
 							</div>
 							<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 								<a href="https://docs.stork.network/resources/contract-addresses/evm" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
@@ -1114,10 +1148,10 @@
 						{#if canceling}
 							<div class="flex items-center gap-2">
 								<div class="spinner-border !w-4 !h-4 !border-2"></div>
-								<span>Canceling...</span>
+								<span>Stopping...</span>
 							</div>
 						{:else}
-							Cancel
+							Stop	
 						{/if}
 					</button>
 				{:else if lastCheckedBlock !== null}
@@ -1145,6 +1179,9 @@
 					<div>{progress}</div>
 					{#if progress.includes('Rate limited')}
 						<div class="text-warning-500">⚠️ Rate limit hit, slowing down requests...</div>
+					{/if}
+					{#if scanningValues && $scanProgress}
+						<div class="text-info-500">🔍 {$scanProgress}</div>
 					{/if}
 				</div>
 			</div>
@@ -1429,20 +1466,6 @@
 							bind:value={valueSearchQuery}
 						/>
 					</div>
-					<button 
-						class="btn variant-filled-primary"
-						on:click={scanValues}
-						disabled={scanningValues || !contractAddress}
-					>
-						{#if scanningValues}
-							<div class="flex items-center gap-2">
-								<div class="spinner-border !w-4 !h-4 !border-2"></div>
-								<span>Scanning...</span>
-							</div>
-						{:else}
-							Scan Values
-						{/if}
-					</button>
 				</div>
 			</div>
 
