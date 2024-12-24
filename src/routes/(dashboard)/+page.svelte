@@ -3,7 +3,7 @@
 	import { ethers } from 'ethers';
 	import { writable, get, type Writable } from 'svelte/store';
 	import { onDestroy } from 'svelte';
-	import { popup } from '@skeletonlabs/skeleton';
+	import { popup, Tab, TabGroup } from '@skeletonlabs/skeleton';
 	
 	let chainId: string = '';
 	let contractAddress: string = '';
@@ -1194,23 +1194,28 @@
 		</div>
 	{/if}
 	
-	<!-- View Selector -->
-	<div class="card p-4">
-		<div class="flex justify-center gap-4">
-			<button 
-				class="btn {currentView === 'transactions' ? 'variant-filled-primary' : 'variant-ghost-surface'}"
-				on:click={() => currentView = 'transactions'}
-			>
-				Transaction History
-			</button>
-			<button 
-				class="btn {currentView === 'values' ? 'variant-filled-primary' : 'variant-ghost-surface'}"
-				on:click={() => currentView = 'values'}
-			>
-				Current Values
-			</button>
-		</div>
-	</div>
+	<!-- View Selector Tabs -->
+	<TabGroup justify="justify-center">
+		<Tab bind:group={currentView} name="transactions" value="transactions">
+			<span class="flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline>
+					<path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+				</svg>
+				<span>Transaction History</span>
+			</span>
+		</Tab>
+		<Tab bind:group={currentView} name="values" value="values">
+			<span class="flex items-center gap-2">
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+					<polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+					<line x1="12" y1="22.08" x2="12" y2="12"></line>
+				</svg>
+				<span>Current Values</span>
+			</span>
+		</Tab>
+	</TabGroup>
 	
 	{#if currentView === 'transactions'}
 		{#if !loading && $transactionStore.length === 0 && !error}
