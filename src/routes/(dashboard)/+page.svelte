@@ -16,6 +16,14 @@
 	let contractInterface: ethers.Interface | null = null;
 	let assetIdMap: Map<string, string> = new Map();
 	let lastCheckedBlock: number | null = null;
+	let currentView: 'transactions' | 'values' = 'transactions';
+	let valueSearchQuery = '';
+	const assetValues: Writable<Map<string, { value: number; timestamp: number; found: boolean }>> = writable(new Map());
+	let scanningValues = false;
+	const sortState = writable({
+		column: null as 'asset' | 'status' | 'value' | 'timestamp' | null,
+		direction: 'asc' as 'asc' | 'desc'
+	});
 
 	// Create a writable store for transactions
 	const transactionStore: Writable<any[]> = writable([]);
@@ -875,6 +883,157 @@
 			abortController = null;
 		}
 	}
+
+	// Scan current values for all assets
+	async function scanValues() {
+		if (!contractAddress || !chainId) return;
+		
+		scanningValues = true;
+		error = null;
+		
+		try {
+			// Setup provider
+			const chainlistResponse = await fetch(`https://chainid.network/chains.json`);
+			const chains = await chainlistResponse.json();
+			const chain = chains.find((c: any) => c.chainId === parseInt(chainId));
+			
+			if (!chain) {
+				throw new Error(`Chain ID ${chainId} not found`);
+			}
+			
+			const rpcUrl = chain.rpc[0];
+			const provider = new ethers.JsonRpcProvider(rpcUrl);
+			
+			if (!contractInterface) {
+				throw new Error('Contract interface not loaded');
+			}
+			
+			const contract = new ethers.Contract(contractAddress, contractInterface, provider);
+			
+			// Clear previous values
+			assetValues.set(new Map());
+			
+			// Process assets in batches to avoid rate limits
+			const assets = [...assetIdMap.entries()];
+			const BATCH_SIZE = 5;
+			const batches = [];
+			
+			for (let i = 0; i < assets.length; i += BATCH_SIZE) {
+				batches.push(assets.slice(i, i + BATCH_SIZE));
+			}
+			
+			let processedCount = 0;
+			const totalAssets = assets.length;
+			
+			for (const batch of batches) {
+				const batchResults = await Promise.all(batch.map(async ([hash]) => {
+					try {
+						const result = await contract.getTemporalNumericValueUnsafeV1(hash);
+						const value = Number(result.quantizedValue) / 1e18;
+						const timestamp = Number(result.timestampNs) / 1_000_000;
+						
+						return [hash, {
+							value,
+							timestamp,
+							found: true
+						}] as const;
+					} catch (e) {
+						console.warn(`No value found for asset ${hash}:`, e);
+						return [hash, {
+							value: 0,
+							timestamp: 0,
+							found: false
+						}] as const;
+					}
+				}));
+				
+				// Update store with batch results
+				assetValues.update(map => {
+					const newMap = new Map(map);
+					for (const [hash, value] of batchResults) {
+						newMap.set(hash, value);
+					}
+					return newMap;
+				});
+				
+				processedCount += batch.length;
+				progress = `Scanning values... ${processedCount}/${totalAssets} assets processed`;
+				
+				// Add a small delay between batches to avoid rate limits
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+			
+			progress = `Scanned ${processedCount} assets`;
+			
+		} catch (e: any) {
+			console.error('Error scanning values:', e);
+			error = e.message;
+		} finally {
+			scanningValues = false;
+		}
+	}
+
+	// Sort function for value scanning table
+	function sortAssets(assets: [string, string][], sortState: { column: string | null, direction: 'asc' | 'desc' }): [string, string][] {
+		if (!sortState.column) return assets;
+		
+		return [...assets].sort((a, b) => {
+			const [hashA, nameA] = a;
+			const [hashB, nameB] = b;
+			const valueA = $assetValues.get(hashA);
+			const valueB = $assetValues.get(hashB);
+			
+			let comparison = 0;
+			switch (sortState.column) {
+				case 'asset':
+					comparison = nameA.localeCompare(nameB);
+					break;
+				case 'status':
+					if (!valueA && !valueB) comparison = 0;
+					else if (!valueA) comparison = 1;
+					else if (!valueB) comparison = -1;
+					else comparison = Number(valueA.found) - Number(valueB.found);
+					break;
+				case 'value':
+					if (!valueA?.found && !valueB?.found) comparison = 0;
+					else if (!valueA?.found) comparison = 1;
+					else if (!valueB?.found) comparison = -1;
+					else comparison = valueA.value - valueB.value;
+					break;
+				case 'timestamp':
+					if (!valueA?.found && !valueB?.found) comparison = 0;
+					else if (!valueA?.found) comparison = 1;
+					else if (!valueB?.found) comparison = -1;
+					else comparison = valueA.timestamp - valueB.timestamp;
+					break;
+			}
+			
+			return sortState.direction === 'asc' ? comparison : -comparison;
+		});
+	}
+
+	let filteredAndSortedAssets: [string, string][] = [];
+
+	$: {
+		// This will re-run whenever assetIdMap, valueSearchQuery, sortState, or assetValues changes
+		const filtered = [...assetIdMap.entries()]
+			.filter(([hash, name]) => 
+				!valueSearchQuery || 
+				name.toLowerCase().includes(valueSearchQuery.toLowerCase())
+			);
+		filteredAndSortedAssets = sortAssets(filtered, $sortState);
+		console.log('Sorting with:', $sortState, 'Results:', filteredAndSortedAssets.length);
+	}
+
+	function toggleSort(column: typeof $sortState.column) {
+		sortState.update(state => {
+			if (state.column === column) {
+				return { ...state, direction: state.direction === 'asc' ? 'desc' : 'asc' };
+			} else {
+				return { column, direction: 'asc' };
+			}
+		});
+	}
 </script>
 
 <div class="container mx-auto p-4 space-y-8">
@@ -998,243 +1157,400 @@
 		</div>
 	{/if}
 	
-	{#if !loading && $transactionStore.length === 0 && !error}
-		<div class="card p-4">
-			<div class="text-center text-gray-500">
-				No transactions found for {currentChainName || 'this contract'}.
-			</div>
+	<!-- View Selector -->
+	<div class="card p-4">
+		<div class="flex justify-center gap-4">
+			<button 
+				class="btn {currentView === 'transactions' ? 'variant-filled-primary' : 'variant-ghost-surface'}"
+				on:click={() => currentView = 'transactions'}
+			>
+				Transaction History
+			</button>
+			<button 
+				class="btn {currentView === 'values' ? 'variant-filled-primary' : 'variant-ghost-surface'}"
+				on:click={() => currentView = 'values'}
+			>
+				Current Values
+			</button>
 		</div>
-	{/if}
+	</div>
 	
-	{#if $transactionStore.length > 0}
-		<div class="space-y-8">
-			<!-- Aggregate Stats -->
+	{#if currentView === 'transactions'}
+		{#if !loading && $transactionStore.length === 0 && !error}
 			<div class="card p-4">
-				<div class="flex justify-between items-center mb-4">
-					<h3 class="h3">Network Overview</h3>
-					<button class="btn btn-sm variant-ghost-primary" on:click={() => $showDetails.network = !$showDetails.network}>
-						{$showDetails.network ? 'Hide' : 'Show'} Details
-					</button>
-				</div>
-				<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-					<!-- Total Assets -->
-					<div class="card variant-soft p-4">
-						<div class="text-2xl font-bold">{$assetStatsStore.size}</div>
-						<div class="text-sm">Total Assets</div>
-						{#if $showDetails.network}
-							<div class="mt-4 space-y-1">
-								<div class="font-semibold mb-2">Asset List:</div>
-								<div class="max-h-48 overflow-y-auto">
-									{#each [...$assetStatsStore.keys()] as assetName, i}
-										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'}">{assetName}</div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					</div>
-
-					<!-- Total Updates -->
-					<div class="card variant-soft p-4">
-						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUpdates}</div>
-						<div class="text-sm">Total Updates</div>
-						<div class="text-sm text-surface-400">
-							{formatGas($aggregateStatsStore.totalGas)} gas used
-						</div>
-						{#if $showDetails.network}
-							<div class="mt-4 space-y-2">
-								<div class="font-semibold">Transaction Details:</div>
-								<div class="p-1 rounded bg-surface-100/50">
-									Unique Transactions: {new Set($transactionStore.map(tx => tx.hash)).size}
-								</div>
-								<div class="max-h-48 overflow-y-auto">
-									{#each $transactionStore as tx, i}
-										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-											{tx.hash}
-										</div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					</div>
-
-					<!-- Unique Updaters -->
-					<div class="card variant-soft p-4">
-						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUniqueUpdaters.size}</div>
-						<div class="text-sm">Unique Updaters</div>
-						<div class="text-sm text-surface-400">
-							{formatGas($aggregateStatsStore.totalGas / $aggregateStatsStore.totalUniqueUpdaters.size)} gas/updater
-						</div>
-						{#if $showDetails.network}
-							<div class="mt-4 space-y-1">
-								<div class="font-semibold mb-2">Updater List:</div>
-								<div class="max-h-48 overflow-y-auto">
-									{#each [...$aggregateStatsStore.totalUniqueUpdaters] as address, i}
-										<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-											<div>{address}</div>
-											{#if $aggregateStatsStore.updaterGasStats.get(address)}
-												<div class="text-surface-400">
-													Gas: {formatGas($aggregateStatsStore.updaterGasStats.get(address)?.totalGas || 0)}
-													({formatGas($aggregateStatsStore.updaterGasStats.get(address)?.averageGas || 0)}/update)
-												</div>
-											{/if}
-										</div>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					</div>
+				<div class="text-center text-gray-500">
+					No transactions found for {currentChainName || 'this contract'}.
 				</div>
 			</div>
-
-			<!-- Timeframe Selector -->
-			<div class="card p-4">
-				<label class="label">
-					<span>Update Frequency Timeframe</span>
-					<select
-						class="select"
-						bind:value={selectedTimeframe}
-					>
-						<option value="day">Last 24 Hours</option>
-						<option value="week">Last Week</option>
-						<option value="month">Last Month</option>
-						<option value="year">Last Year</option>
-						<option value="all">All Time</option>
-					</select>
-				</label>
-			</div>
-
-			<!-- Asset List -->
-			<div class="space-y-4">
-				{#each [...$assetStatsStore.entries()] as [assetId, stats]}
-					<div class="card p-4">
-						<div class="flex items-center justify-between mb-4">
-							<h3 class="h3">{stats.assetName}</h3>
-							<div class="flex items-center gap-4">
-								<div class="badge variant-filled">{stats.updateCount} updates</div>
-								<button class="btn btn-sm variant-ghost-primary" on:click={() => {
-									showDetails.update(details => {
-										const newAssets = new Map(details.assets);
-										const currentDetails = newAssets.get(assetId) || { shown: false, showHashes: false };
-										newAssets.set(assetId, { ...currentDetails, shown: !currentDetails.shown });
-										return { ...details, assets: newAssets };
-									});
-								}}>
-									{$showDetails.assets.get(assetId)?.shown ? 'Hide' : 'Show'} Details
-								</button>
-							</div>
-						</div>
-						
-						<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-							<!-- Last Update -->
-							<div class="card variant-soft p-4">
-								<div class="text-sm font-semibold mb-2">Last Update</div>
-								{#if stats.lastUpdate}
-									<div>Value: {stats.lastUpdate.value}</div>
-									<div class="text-sm">{new Date(stats.lastUpdate.timestamp).toLocaleString()}</div>
-									<div class="text-sm text-surface-400">{formatTimeAgo(stats.lastUpdate.timestamp)}</div>
-								{:else}
-									<div>No updates yet</div>
-								{/if}
-							</div>
-							
-							<!-- Update Frequency -->
-							<div class="card variant-soft p-4">
-								<div class="text-sm font-semibold mb-2 flex items-center gap-2">
-									<span>Update Statistics</span>
-									<div class="relative group">
-										<div class="text-surface-500 cursor-help">
-											<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-												<circle cx="12" cy="12" r="10"></circle>
-												<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-												<line x1="12" y1="17" x2="12.01" y2="17"></line>
-											</svg>
-										</div>
-										<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
-											Statistics calculated over the selected time period
-										</div>
+		{/if}
+		
+		{#if $transactionStore.length > 0}
+			<div class="space-y-8">
+				<!-- Aggregate Stats -->
+				<div class="card p-4">
+					<div class="flex justify-between items-center mb-4">
+						<h3 class="h3">Network Overview</h3>
+						<button class="btn btn-sm variant-ghost-primary" on:click={() => $showDetails.network = !$showDetails.network}>
+							{$showDetails.network ? 'Hide' : 'Show'} Details
+						</button>
+					</div>
+					<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+						<!-- Total Assets -->
+						<div class="card variant-soft p-4">
+							<div class="text-2xl font-bold">{$assetStatsStore.size}</div>
+							<div class="text-sm">Total Assets</div>
+							{#if $showDetails.network}
+								<div class="mt-4 space-y-1">
+									<div class="font-semibold mb-2">Asset List:</div>
+									<div class="max-h-48 overflow-y-auto">
+										{#each [...$assetStatsStore.keys()] as assetName, i}
+											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'}">{assetName}</div>
+										{/each}
 									</div>
 								</div>
-								<div class="text-sm space-y-1">
-									{#if stats.updates.length > 0}
-										{@const updateStats = calculateUpdateStats(stats.updates, selectedTimeframe)}
-										<div>Updates/day: {updateStats.updatesPerDay.toFixed(1)}</div>
-										<div>Average gap: {formatFrequency(updateStats.averageFrequency)}</div>
-										{#if $showDetails.assets.get(assetId)?.shown}
-											<div>Median gap: {formatFrequency(updateStats.medianFrequency)}</div>
-											<div>Min gap: {formatFrequency(updateStats.minGap)}</div>
-											<div>Max gap: {formatFrequency(updateStats.maxGap)}</div>
-										{/if}
-									{:else}
-										<div>No updates in selected timeframe</div>
-									{/if}
-								</div>
+							{/if}
+						</div>
+
+						<!-- Total Updates -->
+						<div class="card variant-soft p-4">
+							<div class="text-2xl font-bold">{$aggregateStatsStore.totalUpdates}</div>
+							<div class="text-sm">Total Updates</div>
+							<div class="text-sm text-surface-400">
+								{formatGas($aggregateStatsStore.totalGas)} gas used
 							</div>
-							
-							<!-- Unique Updaters -->
-							<div class="card variant-soft p-4">
-								<div class="text-sm font-semibold mb-2">Unique Updaters</div>
-								<div>{stats.uniqueUpdaters.size}</div>
-								{#if $showDetails.assets.get(assetId)?.shown}
-									<div class="mt-4 space-y-1 max-h-48 overflow-y-auto text-sm">
-										{#each [...stats.uniqueUpdaters] as address, i}
+							{#if $showDetails.network}
+								<div class="mt-4 space-y-2">
+									<div class="font-semibold">Transaction Details:</div>
+									<div class="p-1 rounded bg-surface-100/50">
+										Unique Transactions: {new Set($transactionStore.map(tx => tx.hash)).size}
+									</div>
+									<div class="max-h-48 overflow-y-auto">
+										{#each $transactionStore as tx, i}
 											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-												{address}
+												{tx.hash}
 											</div>
 										{/each}
 									</div>
-								{/if}
-							</div>
-							
-							<!-- Update Count -->
-							<div class="card variant-soft p-4">
-								<div class="text-sm font-semibold mb-2">Total Updates</div>
-								<div>{stats.updateCount}</div>
-								<div class="text-sm text-surface-400">
-									{formatGas(stats.totalGas)} gas used
-									({formatGas(stats.totalGas / stats.updateCount)}/update)
 								</div>
-								{#if $showDetails.assets.get(assetId)?.shown}
-									<div class="mt-4 space-y-2">
-										<div class="flex justify-between items-center">
-											<div class="text-sm font-semibold">Gas by Updater:</div>
-											<button class="btn btn-sm variant-glass-primary" on:click={() => {
-												showDetails.update(details => {
-													const newAssets = new Map(details.assets);
-													const currentDetails = newAssets.get(assetId) || { shown: true, showHashes: false };
-													newAssets.set(assetId, { ...currentDetails, showHashes: !currentDetails.showHashes });
-													return { ...details, assets: newAssets };
-												});
-											}}>
-												Show {$showDetails.assets.get(assetId)?.showHashes ? 'Values' : 'Tx Hashes'}
-											</button>
-										</div>
-										<div class="max-h-48 overflow-y-auto">
-											{#if $showDetails.assets.get(assetId)?.showHashes}
-												{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
-													<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-														{update.txHash}
-														<div class="text-surface-400">Gas: {formatGas(update.gasUsed)}</div>
-													</div>
-												{/each}
-											{:else}
-												{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
-													<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-														<div>Value: {update.value}</div>
-														<div>{new Date(update.timestamp).toLocaleString()}</div>
-														<div class="text-surface-400">
-															{formatTimeAgo(update.timestamp)}
-															• Gas: {formatGas(update.gasUsed)}
-														</div>
-													</div>
-												{/each}
-											{/if}
-										</div>
-									</div>
-								{/if}
+							{/if}
+						</div>
+
+						<!-- Unique Updaters -->
+						<div class="card variant-soft p-4">
+							<div class="text-2xl font-bold">{$aggregateStatsStore.totalUniqueUpdaters.size}</div>
+							<div class="text-sm">Unique Updaters</div>
+							<div class="text-sm text-surface-400">
+								{formatGas($aggregateStatsStore.totalGas / $aggregateStatsStore.totalUniqueUpdaters.size)} gas/updater
 							</div>
+							{#if $showDetails.network}
+								<div class="mt-4 space-y-1">
+									<div class="font-semibold mb-2">Updater List:</div>
+									<div class="max-h-48 overflow-y-auto">
+										{#each [...$aggregateStatsStore.totalUniqueUpdaters] as address, i}
+											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+												<div>{address}</div>
+												{#if $aggregateStatsStore.updaterGasStats.get(address)}
+													<div class="text-surface-400">
+														Gas: {formatGas($aggregateStatsStore.updaterGasStats.get(address)?.totalGas || 0)}
+														({formatGas($aggregateStatsStore.updaterGasStats.get(address)?.averageGas || 0)}/update)
+													</div>
+												{/if}
+											</div>
+										{/each}
+									</div>
+								</div>
+							{/if}
 						</div>
 					</div>
-				{/each}
+				</div>
+
+				<!-- Timeframe Selector -->
+				<div class="card p-4">
+					<label class="label">
+						<span>Update Frequency Timeframe</span>
+						<select
+							class="select"
+							bind:value={selectedTimeframe}
+						>
+							<option value="day">Last 24 Hours</option>
+							<option value="week">Last Week</option>
+							<option value="month">Last Month</option>
+							<option value="year">Last Year</option>
+							<option value="all">All Time</option>
+						</select>
+					</label>
+				</div>
+
+				<!-- Asset List -->
+				<div class="space-y-4">
+					{#each [...$assetStatsStore.entries()] as [assetId, stats]}
+						<div class="card p-4">
+							<div class="flex items-center justify-between mb-4">
+								<h3 class="h3">{stats.assetName}</h3>
+								<div class="flex items-center gap-4">
+									<div class="badge variant-filled">{stats.updateCount} updates</div>
+									<button class="btn btn-sm variant-ghost-primary" on:click={() => {
+										showDetails.update(details => {
+											const newAssets = new Map(details.assets);
+											const currentDetails = newAssets.get(assetId) || { shown: false, showHashes: false };
+											newAssets.set(assetId, { ...currentDetails, shown: !currentDetails.shown });
+											return { ...details, assets: newAssets };
+										});
+									}}>
+										{$showDetails.assets.get(assetId)?.shown ? 'Hide' : 'Show'} Details
+									</button>
+								</div>
+							</div>
+							
+							<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+								<!-- Last Update -->
+								<div class="card variant-soft p-4">
+									<div class="text-sm font-semibold mb-2">Last Update</div>
+									{#if stats.lastUpdate}
+										<div>Value: {stats.lastUpdate.value}</div>
+										<div class="text-sm">{new Date(stats.lastUpdate.timestamp).toLocaleString()}</div>
+										<div class="text-sm text-surface-400">{formatTimeAgo(stats.lastUpdate.timestamp)}</div>
+									{:else}
+										<div>No updates yet</div>
+									{/if}
+								</div>
+								
+								<!-- Update Frequency -->
+								<div class="card variant-soft p-4">
+									<div class="text-sm font-semibold mb-2 flex items-center gap-2">
+										<span>Update Statistics</span>
+										<div class="relative group">
+											<div class="text-surface-500 cursor-help">
+												<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+													<circle cx="12" cy="12" r="10"></circle>
+													<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+													<line x1="12" y1="17" x2="12.01" y2="17"></line>
+												</svg>
+											</div>
+											<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+												Statistics calculated over the selected time period
+											</div>
+										</div>
+									</div>
+									<div class="text-sm space-y-1">
+										{#if stats.updates.length > 0}
+											{@const updateStats = calculateUpdateStats(stats.updates, selectedTimeframe)}
+											<div>Updates/day: {updateStats.updatesPerDay.toFixed(1)}</div>
+											<div>Average gap: {formatFrequency(updateStats.averageFrequency)}</div>
+											{#if $showDetails.assets.get(assetId)?.shown}
+												<div>Median gap: {formatFrequency(updateStats.medianFrequency)}</div>
+												<div>Min gap: {formatFrequency(updateStats.minGap)}</div>
+												<div>Max gap: {formatFrequency(updateStats.maxGap)}</div>
+											{/if}
+										{:else}
+											<div>No updates in selected timeframe</div>
+										{/if}
+									</div>
+								</div>
+								
+								<!-- Unique Updaters -->
+								<div class="card variant-soft p-4">
+									<div class="text-sm font-semibold mb-2">Unique Updaters</div>
+									<div>{stats.uniqueUpdaters.size}</div>
+									{#if $showDetails.assets.get(assetId)?.shown}
+										<div class="mt-4 space-y-1 max-h-48 overflow-y-auto text-sm">
+											{#each [...stats.uniqueUpdaters] as address, i}
+												<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+													{address}
+												</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+								
+								<!-- Update Count -->
+								<div class="card variant-soft p-4">
+									<div class="text-sm font-semibold mb-2">Total Updates</div>
+									<div>{stats.updateCount}</div>
+									<div class="text-sm text-surface-400">
+										{formatGas(stats.totalGas)} gas used
+										({formatGas(stats.totalGas / stats.updateCount)}/update)
+									</div>
+									{#if $showDetails.assets.get(assetId)?.shown}
+										<div class="mt-4 space-y-2">
+											<div class="flex justify-between items-center">
+												<div class="text-sm font-semibold">Gas by Updater:</div>
+												<button class="btn btn-sm variant-glass-primary" on:click={() => {
+													showDetails.update(details => {
+														const newAssets = new Map(details.assets);
+														const currentDetails = newAssets.get(assetId) || { shown: true, showHashes: false };
+														newAssets.set(assetId, { ...currentDetails, showHashes: !currentDetails.showHashes });
+														return { ...details, assets: newAssets };
+													});
+												}}>
+													Show {$showDetails.assets.get(assetId)?.showHashes ? 'Values' : 'Tx Hashes'}
+												</button>
+											</div>
+											<div class="max-h-48 overflow-y-auto">
+												{#if $showDetails.assets.get(assetId)?.showHashes}
+													{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
+														<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+															{update.txHash}
+															<div class="text-surface-400">Gas: {formatGas(update.gasUsed)}</div>
+														</div>
+													{/each}
+												{:else}
+													{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
+														<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
+															<div>Value: {update.value}</div>
+															<div>{new Date(update.timestamp).toLocaleString()}</div>
+															<div class="text-surface-400">
+																{formatTimeAgo(update.timestamp)}
+																• Gas: {formatGas(update.gasUsed)}
+															</div>
+														</div>
+													{/each}
+												{/if}
+											</div>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+	{:else}
+		<!-- Value Scanning View -->
+		<div class="space-y-4">
+			<div class="card p-4">
+				<div class="flex justify-between items-center gap-4">
+					<div class="flex-1">
+						<input
+							type="text"
+							class="input w-full"
+							placeholder="Search assets..."
+							bind:value={valueSearchQuery}
+						/>
+					</div>
+					<button 
+						class="btn variant-filled-primary"
+						on:click={scanValues}
+						disabled={scanningValues || !contractAddress}
+					>
+						{#if scanningValues}
+							<div class="flex items-center gap-2">
+								<div class="spinner-border !w-4 !h-4 !border-2"></div>
+								<span>Scanning...</span>
+							</div>
+						{:else}
+							Scan Values
+						{/if}
+					</button>
+				</div>
+			</div>
+
+			<!-- Results Table -->
+			<div class="card p-4">
+				<div class="table-container">
+					<table class="table table-compact">
+						<thead>
+							<tr>
+								<th>
+									<button class="flex items-center gap-2" on:click={() => toggleSort('asset')}>
+										Asset
+										{#if $sortState.column === 'asset'}
+											<span class="text-primary-500">
+												{#if $sortState.direction === 'asc'}
+													↑
+												{:else}
+													↓
+												{/if}
+											</span>
+										{/if}
+									</button>
+								</th>
+								<th>
+									<button class="flex items-center gap-2" on:click={() => toggleSort('status')}>
+											Status
+										{#if $sortState.column === 'status'}
+											<span class="text-primary-500">
+												{#if $sortState.direction === 'asc'}
+													↑
+												{:else}
+													↓
+												{/if}
+											</span>
+										{/if}
+									</button>
+								</th>
+								<th>
+									<button class="flex items-center gap-2" on:click={() => toggleSort('value')}>
+										Latest Value
+										{#if $sortState.column === 'value'}
+											<span class="text-primary-500">
+												{#if $sortState.direction === 'asc'}
+													↑
+												{:else}
+													↓
+												{/if}
+											</span>
+										{/if}
+									</button>
+								</th>
+								<th>
+									<button class="flex items-center gap-2" on:click={() => toggleSort('timestamp')}>
+										Timestamp
+										{#if $sortState.column === 'timestamp'}
+											<span class="text-primary-500">
+												{#if $sortState.direction === 'asc'}
+													↑
+												{:else}
+													↓
+												{/if}
+											</span>
+										{/if}
+									</button>
+								</th>
+								<th>Age</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each filteredAndSortedAssets as [hash, name]}
+								{@const value = $assetValues.get(hash)}
+								<tr>
+									<td>{name}</td>
+									<td>
+										{#if value === undefined}
+											<span class="badge variant-ghost">Not Scanned</span>
+										{:else if value.found}
+											<span class="badge variant-filled-success">✓ Found</span>
+										{:else}
+											<span class="badge variant-filled-error">✗ Not Found</span>
+										{/if}
+									</td>
+									<td>
+										{#if value?.found}
+											{value.value}
+										{:else}
+											-
+										{/if}
+									</td>
+									<td>
+										{#if value?.found}
+											{new Date(value.timestamp).toLocaleString()}
+										{:else}
+											-
+										{/if}
+									</td>
+									<td>
+										{#if value?.found}
+											{formatTimeAgo(value.timestamp)}
+										{:else}
+											-
+										{/if}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -1247,6 +1563,15 @@
 	
 	.spinner-border {
 		@apply w-8 h-8 border-4 border-primary-500 border-r-transparent rounded-full animate-spin;
+	}
+
+	/* Sort button styles */
+	th button {
+		@apply w-full font-bold hover:text-primary-500 transition-colors;
+	}
+
+	th button span {
+		@apply font-bold text-lg leading-none;
 	}
 </style>
 
