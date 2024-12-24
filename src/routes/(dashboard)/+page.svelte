@@ -1,24 +1,49 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { ethers } from 'ethers';
-	import { writable, type Writable } from 'svelte/store';
+	import { writable, get, type Writable } from 'svelte/store';
 	import { onDestroy } from 'svelte';
+	import { popup } from '@skeletonlabs/skeleton';
 	
 	let chainId: string = '';
 	let contractAddress: string = '';
 	let loading = false;
 	let progress = '';
 	let error: string | null = null;
-	let wsProvider: ethers.WebSocketProvider | null = null;
 	let currentChainName: string = '';
 	let abortController: AbortController | null = null;
 	let contractInterface: ethers.Interface | null = null;
-	let wsConnected = false;
-	let wsError: string | null = null;
 	let assetIdMap: Map<string, string> = new Map();
 
 	// Create a writable store for transactions
 	const transactionStore: Writable<any[]> = writable([]);
+
+	// Types for our analytics
+	interface AssetUpdate {
+		timestamp: number;
+		value: number;
+		from: string;
+	}
+
+	interface AssetStats {
+		assetName: string;
+		lastUpdate: AssetUpdate | null;
+		updateCount: number;
+		uniqueUpdaters: Set<string>;
+		updates: AssetUpdate[];
+	}
+
+	// Create stores for our analytics
+	const assetStatsStore: Writable<Map<string, AssetStats>> = writable(new Map());
+	const aggregateStatsStore: Writable<{
+		totalAssets: number;
+		totalUpdates: number;
+		totalUniqueUpdaters: Set<string>;
+	}> = writable({
+		totalAssets: 0,
+		totalUpdates: 0,
+		totalUniqueUpdaters: new Set()
+	});
 
 	// Fetch ABI from Arbitrum Sepolia implementation contract
 	async function fetchABI() {
@@ -157,6 +182,94 @@
 		return value;
 	}
 
+	// Process transaction into stats
+	function processTransactionForStats(tx: any) {
+		if (!tx.decodedInput?.updates) return;
+		
+		assetStatsStore.update(statsMap => {
+			tx.decodedInput.updates.forEach((update: any) => {
+				const assetId = update.assetName;
+				const currentStats = statsMap.get(assetId) || {
+					assetName: assetId,
+					updateCount: 0,
+					uniqueUpdaters: new Set<string>(),
+					updates: [] as AssetUpdate[],
+					lastUpdate: null
+				};
+				
+				const newUpdate: AssetUpdate = {
+					timestamp: Number(update.rawTimestamp) / 1_000_000, // Convert to ms
+					value: Number(update.rawValue) / 1e18,
+					from: tx.from
+				};
+				
+				currentStats.updateCount++;
+				currentStats.uniqueUpdaters.add(tx.from);
+				currentStats.updates.push(newUpdate);
+				
+				// Update last update if newer
+				if (!currentStats.lastUpdate || newUpdate.timestamp > currentStats.lastUpdate.timestamp) {
+					currentStats.lastUpdate = newUpdate;
+				}
+				
+				statsMap.set(assetId, currentStats);
+			});
+			
+			return statsMap;
+		});
+		
+		// Update aggregate stats
+		aggregateStatsStore.update(stats => {
+			tx.decodedInput.updates.forEach((update: any) => {
+				stats.totalUpdates++;
+				stats.totalUniqueUpdaters.add(tx.from);
+			});
+			return stats;
+		});
+
+		// Update progress with current stats
+		const stats = get(aggregateStatsStore);
+		progress = `Processing transactions... Found ${stats.totalUpdates} updates across ${$assetStatsStore.size} assets`;
+	}
+
+	// Calculate update frequency for a timeframe
+	function calculateFrequency(updates: AssetUpdate[], timeframe: 'day' | 'week' | 'month' | 'year' | 'all'): number {
+		if (updates.length < 2) return 0;
+		
+		const now = Date.now();
+		let cutoff = now;
+		
+		switch (timeframe) {
+			case 'day':
+				cutoff = now - 24 * 60 * 60 * 1000;
+				break;
+			case 'week':
+				cutoff = now - 7 * 24 * 60 * 60 * 1000;
+				break;
+			case 'month':
+				cutoff = now - 30 * 24 * 60 * 60 * 1000;
+				break;
+			case 'year':
+				cutoff = now - 365 * 24 * 60 * 60 * 1000;
+				break;
+		}
+		
+		const relevantUpdates = timeframe === 'all' 
+			? updates 
+			: updates.filter(u => u.timestamp >= cutoff);
+		
+		if (relevantUpdates.length < 2) return 0;
+		
+		// Sort updates by timestamp ascending for frequency calculation
+		const sortedUpdates = [...relevantUpdates].sort((a, b) => a.timestamp - b.timestamp);
+		
+		// Calculate total time span and divide by number of intervals between updates
+		const timeSpan = sortedUpdates[sortedUpdates.length - 1].timestamp - sortedUpdates[0].timestamp;
+		const numIntervals = sortedUpdates.length - 1;
+		
+		return timeSpan / numIntervals; // Average time between updates in ms
+	}
+
 	// Add a transaction to the store
 	function addTransaction(tx: any) {
 		if (!tx) return;
@@ -174,6 +287,7 @@
 							...tx,
 							decodedInput
 						};
+						processTransactionForStats(enrichedTx);
 						return [enrichedTx, ...txs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
 					}
 					return txs;
@@ -182,57 +296,26 @@
 		}
 	}
 
-	// Subscribe to new events
-	function subscribeToEvents(provider: ethers.WebSocketProvider) {
-		try {
-			const filter = {
-				address: contractAddress,
-				topics: []
-			};
-			
-			provider.on(filter, async (log) => {
-				if (!log.transactionHash) return;
-				
-				try {
-					const tx = await provider.getTransaction(log.transactionHash);
-					addTransaction(tx);
-				} catch (e) {
-					console.warn('Error fetching new transaction:', e);
-				}
-			});
-			
-			// Add connection status handlers
-			provider.on('connect', () => {
-				console.log('WebSocket connected');
-				wsConnected = true;
-				wsError = null;
-			});
-			
-			provider.on('disconnect', () => {
-				console.log('WebSocket disconnected');
-				wsConnected = false;
-				wsError = 'Disconnected from websocket';
-			});
-			
-			provider.on('error', (error) => {
-				console.log('WebSocket error:', error);
-				wsConnected = false;
-				wsError = error?.message || 'Unknown websocket error';
-			});
-			
-			console.log('Subscribed to new events');
-		} catch (e: any) {
-			console.error('Error setting up event subscription:', e);
-			wsConnected = false;
-			wsError = e?.message || 'Failed to setup websocket';
-		}
-	}
-
 	async function fetchTransactions() {
 		loading = true;
 		error = null;
+		
+		// Reset all stores
 		transactionStore.set([]);
+		assetStatsStore.set(new Map());
+		aggregateStatsStore.set({
+			totalAssets: 0,
+			totalUpdates: 0,
+			totalUniqueUpdaters: new Set()
+		});
+		
+		// Reset other state
 		currentChainName = '';
+		
+		// Create new abort controller
+		if (abortController) {
+			abortController.abort();
+		}
 		abortController = new AbortController();
 		
 		try {
@@ -256,21 +339,9 @@
 			progress = 'Fetching contract ABI...';
 			await fetchABI();
 			
-			// Setup providers
+			// Setup provider
 			const rpcUrl = chain.rpc[0];
 			const provider = new ethers.JsonRpcProvider(rpcUrl);
-			
-			// Try to set up websocket if available
-			const wsUrl = chain.rpc.find((url: string) => url.startsWith('wss://'));
-			if (wsUrl) {
-				try {
-					wsProvider?.destroy();
-					wsProvider = new ethers.WebSocketProvider(wsUrl);
-					subscribeToEvents(wsProvider);
-				} catch (e) {
-					console.warn('Failed to setup websocket:', e);
-				}
-			}
 			
 			progress = 'Getting latest block...';
 			const latestBlock = await provider.getBlockNumber();
@@ -296,21 +367,28 @@
 					
 					console.log(`Found ${logs.length} logs in range ${fromBlock}-${block}`);
 					
-					const txHashes = [...new Set(logs.map(log => log.transactionHash).filter(Boolean))];
-					const BATCH_SIZE = 20;
+					// Sort logs by block number descending (most recent first)
+					const sortedLogs = [...logs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
+					
+					const txHashes = [...new Set(sortedLogs.map(log => log.transactionHash).filter(Boolean))];
+					const BATCH_SIZE = 20; // Keep small to avoid overwhelming RPC
 					const batches = [];
 					for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
 						const batch = txHashes.slice(i, i + BATCH_SIZE);
 						batches.push(batch);
 					}
 
+					let processedCount = 0;
+					const totalToProcess = txHashes.length;
+
 					for (const batch of batches) {
 						let batchSuccess = false;
 						let batchRetries = 0;
+						let batchConsecutiveFailures = 0;
 						
 						while (!batchSuccess && batchRetries < 3 && !abortController?.signal.aborted) {
 							try {
-								progress = `Processing ${batch.length} transactions...`;
+								progress = `Processing transactions ${processedCount + 1}-${Math.min(processedCount + batch.length, totalToProcess)} of ${totalToProcess}...`;
 								const [txs, receipts] = await Promise.all([
 									Promise.all(batch.map(hash => provider.getTransaction(hash))),
 									Promise.all(batch.map(hash => provider.getTransactionReceipt(hash)))
@@ -329,9 +407,15 @@
 								}
 								
 								batchSuccess = true;
+								batchConsecutiveFailures = 0;
+								processedCount += batch.length;
 							} catch (e) {
 								console.warn(`Batch retry ${batchRetries + 1}/3 failed:`, e);
 								batchRetries++;
+								batchConsecutiveFailures++;
+								if (batchConsecutiveFailures >= 50) {
+									throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+								}
 								if (batchRetries < 3) {
 									await new Promise(resolve => setTimeout(resolve, retryDelay));
 									retryDelay = Math.min(retryDelay * 1.5, 10000); // Exponential backoff up to 10s
@@ -365,6 +449,10 @@
 					console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
 					consecutiveFailures++;
 					consecutiveSuccesses = 0;
+					
+					if (consecutiveFailures >= 50) {
+						throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
+					}
 					
 					// Check for rate limit errors
 					if (e?.message?.includes('rate') || e?.message?.includes('limit')) {
@@ -401,28 +489,50 @@
 		if (abortController) {
 			abortController.abort();
 		}
-		wsProvider?.destroy();
-		wsProvider = null;
-		wsConnected = false;
-		wsError = 'Cancelled';
 	}
 
-	// Cleanup on component destroy
-	onDestroy(() => {
-		wsProvider?.destroy();
-		wsConnected = false;
-		wsError = null;
-	});
+	// Selected timeframe for frequency calculation
+	let selectedTimeframe: 'day' | 'week' | 'month' | 'year' | 'all' = 'day';
+	
+	// Format frequency to human readable
+	function formatFrequency(ms: number): string {
+		if (ms === 0) return 'N/A';
+		const seconds = ms / 1000;
+		if (seconds < 60) return `${seconds.toFixed(1)} seconds`;
+		if (seconds < 3600) return `${(seconds / 60).toFixed(1)} minutes`;
+		if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} hours`;
+		return `${(seconds / 86400).toFixed(1)} days`;
+	}
 </script>
 
 <div class="container mx-auto p-4 space-y-8">
-	<h1 class="h1">Contract Transaction Dashboard</h1>
+	{#if currentChainName}
+		<div class="card p-4">
+			<h4 class="h4"><strong>Chain:</strong> {currentChainName}</h4>
+		</div>
+	{/if}
 	
 	<div class="card p-4">
 		<form class="space-y-4" on:submit|preventDefault={fetchTransactions}>
 			<div class="space-y-2">
 				<label class="label" for="chainId">
-					<span>Chain ID</span>
+					<div class="flex items-center gap-2">
+						<span>Chain ID</span>
+						<div class="relative group">
+							<div class="text-surface-500 cursor-help">
+								<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+									<circle cx="12" cy="12" r="10"></circle>
+									<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+									<line x1="12" y1="17" x2="12.01" y2="17"></line>
+								</svg>
+							</div>
+							<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+								<a href="https://chainlist.org" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
+									EVM Chain IDs can be found at chainlist.org
+								</a>
+							</div>
+						</div>
+					</div>
 				</label>
 				<input
 					class="input"
@@ -436,7 +546,23 @@
 			
 			<div class="space-y-2">
 				<label class="label" for="contractAddress">
-					<span>Contract Address</span>
+					<div class="flex items-center gap-2">
+						<span>Contract Address</span>
+						<div class="relative group">
+							<div class="text-surface-500 cursor-help">
+								<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+									<circle cx="12" cy="12" r="10"></circle>
+									<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+									<line x1="12" y1="17" x2="12.01" y2="17"></line>
+								</svg>
+							</div>
+							<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+								<a href="https://docs.stork.network/resources/contract-addresses/evm" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
+									Stork contract addresses can be found in the Stork docs 
+								</a>
+							</div>
+						</div>
+					</div>
 				</label>
 				<input
 					class="input"
@@ -470,23 +596,6 @@
 		</div>
 	{/if}
 	
-	<div class="card p-4 {wsConnected ? 'bg-success-500/20' : 'bg-error-500/20'}">
-		<div class="flex items-center space-x-2">
-			<div class="w-2 h-2 rounded-full {wsConnected ? 'bg-success-500' : 'bg-error-500'} animate-pulse"></div>
-			<span>
-				{#if wsConnected}
-					WebSocket Connected - Listening for new transactions
-				{:else if wsError}
-					<span class="tooltip tooltip-bottom" data-tip={wsError}>
-						WebSocket Disconnected - Hover for details
-					</span>
-				{:else}
-					No WebSocket Available
-				{/if}
-			</span>
-		</div>
-	</div>
-	
 	{#if error}
 		<div class="alert variant-filled-error">
 			{error}
@@ -502,49 +611,98 @@
 	{/if}
 	
 	{#if $transactionStore.length > 0}
-		<div class="card p-4">
-			<h2 class="h2">Transactions ({$transactionStore.length})</h2>
-			<div class="table-container">
-				<table class="table table-compact">
-					<thead>
-						<tr>
-							<th>Block</th>
-							<th>Hash</th>
-							<th>From</th>
-							<th>Updates</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each $transactionStore as tx}
-							<tr>
-								<td>{tx.blockNumber}</td>
-								<td class="font-mono text-xs break-all whitespace-normal">{tx.hash}</td>
-								<td class="font-mono break-all">{tx.from}</td>
-								<td class="font-mono break-all">
-									<div class="max-h-96 overflow-y-auto">
-										{#if tx.decodedInput?.updates}
-											<div class="space-y-2">
-												{#each tx.decodedInput.updates as update}
-													<div class="p-2 bg-surface-200/50 rounded">
-														<div>Asset: {update.assetName}</div>
-														<div class="text-xs text-surface-600">ID: {update.id}</div>
-														<div>Time: {update.timestamp}</div>
-														<div>Value: {update.value}</div>
-														<div class="text-xs text-surface-600">
-															Raw: {update.rawValue} @ {update.rawTimestamp}ns
-														</div>
-													</div>
-												{/each}
-											</div>
-										{:else}
-											Creation Transaction
-										{/if}
+		<div class="space-y-8">
+			<!-- Aggregate Stats -->
+			<div class="card p-4">
+				<h2 class="h2 mb-4">Network Overview</h2>
+				<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+					<div class="card variant-soft p-4">
+						<div class="text-2xl font-bold">{$assetStatsStore.size}</div>
+						<div class="text-sm">Total Assets</div>
+					</div>
+					<div class="card variant-soft p-4">
+						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUpdates}</div>
+						<div class="text-sm">Total Updates</div>
+					</div>
+					<div class="card variant-soft p-4">
+						<div class="text-2xl font-bold">{$aggregateStatsStore.totalUniqueUpdaters.size}</div>
+						<div class="text-sm">Unique Updaters</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Timeframe Selector -->
+			<div class="card p-4">
+				<label class="label">
+					<span>Update Frequency Timeframe</span>
+					<select
+						class="select"
+						bind:value={selectedTimeframe}
+					>
+						<option value="day">Last 24 Hours</option>
+						<option value="week">Last Week</option>
+						<option value="month">Last Month</option>
+						<option value="year">Last Year</option>
+						<option value="all">All Time</option>
+					</select>
+				</label>
+			</div>
+
+			<!-- Asset List -->
+			<div class="space-y-4">
+				{#each [...$assetStatsStore.entries()] as [assetId, stats]}
+					<div class="card p-4">
+						<div class="flex items-center justify-between mb-4">
+							<h3 class="h3">{stats.assetName}</h3>
+							<div class="badge variant-filled">{stats.updateCount} updates</div>
+						</div>
+						
+						<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+							<!-- Last Update -->
+							<div class="card variant-soft p-4">
+								<div class="text-sm font-semibold mb-2">Last Update</div>
+								{#if stats.lastUpdate}
+									<div>Value: {stats.lastUpdate.value}</div>
+									<div class="text-sm">{new Date(stats.lastUpdate.timestamp).toLocaleString()}</div>
+								{:else}
+									<div>No updates yet</div>
+								{/if}
+							</div>
+							
+							<!-- Update Frequency -->
+							<div class="card variant-soft p-4">
+								<div class="text-sm font-semibold mb-2 flex items-center gap-2">
+									<span>Average Update Frequency</span>
+									<div class="relative group">
+										<div class="text-surface-500 cursor-help">
+											<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+												<circle cx="12" cy="12" r="10"></circle>
+												<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+												<line x1="12" y1="17" x2="12.01" y2="17"></line>
+											</svg>
+										</div>
+										<div class="absolute left-0 bottom-full mb-2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
+											Calculated as average time between updates from first to last update in the selected period
+										</div>
 									</div>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+								</div>
+								<div>{formatFrequency(calculateFrequency(stats.updates, selectedTimeframe))}</div>
+							</div>
+							
+							<!-- Unique Updaters -->
+							<div class="card variant-soft p-4">
+								<div class="text-sm font-semibold mb-2">Unique Updaters</div>
+								<div>{stats.uniqueUpdaters.size}</div>
+							</div>
+							
+							<!-- Update Count -->
+							<div class="card variant-soft p-4">
+								<div class="text-sm font-semibold mb-2">Total Updates</div>
+								<div>{stats.updateCount}</div>
+							</div>
+						</div>
+					</div>
+				{/each}
 			</div>
 		</div>
 	{/if}
