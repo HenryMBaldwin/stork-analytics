@@ -959,9 +959,11 @@
 										{@const updateStats = calculateUpdateStats(stats.updates, selectedTimeframe)}
 										<div>Updates/day: {updateStats.updatesPerDay.toFixed(1)}</div>
 										<div>Average gap: {formatFrequency(updateStats.averageFrequency)}</div>
-										<div>Median gap: {formatFrequency(updateStats.medianFrequency)}</div>
-										<div>Min gap: {formatFrequency(updateStats.minGap)}</div>
-										<div>Max gap: {formatFrequency(updateStats.maxGap)}</div>
+										{#if $showDetails.assets.get(assetId)?.shown}
+											<div>Median gap: {formatFrequency(updateStats.medianFrequency)}</div>
+											<div>Min gap: {formatFrequency(updateStats.minGap)}</div>
+											<div>Max gap: {formatFrequency(updateStats.maxGap)}</div>
+										{/if}
 									{:else}
 										<div>No updates in selected timeframe</div>
 									{/if}
