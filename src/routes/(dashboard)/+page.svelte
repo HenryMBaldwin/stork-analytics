@@ -68,50 +68,58 @@
 		}
 	}
 
+	// Format timestamp from nanoseconds to human readable
+	function formatTimestamp(timestampNs: bigint): string {
+		const timestampMs = Number(timestampNs) / 1_000_000; // Convert ns to ms
+		const date = new Date(timestampMs);
+		return date.toLocaleString();
+	}
+
+	// Format quantized value (divided by 10^18)
+	function formatValue(quantizedValue: bigint): string {
+		const value = Number(quantizedValue) / 1e18;
+		return value.toString();
+	}
+
+	// Process update data into a more readable format
+	function processUpdateData(args: any[]): any {
+		if (!args || !args[0]) return null;
+		
+		const updates = args[0].map((update: any) => ({
+			id: update.id,
+			timestamp: formatTimestamp(update.temporalNumericValue.timestampNs),
+			value: formatValue(update.temporalNumericValue.quantizedValue),
+			rawTimestamp: update.temporalNumericValue.timestampNs.toString(),
+			rawValue: update.temporalNumericValue.quantizedValue.toString()
+		}));
+		
+		return updates;
+	}
+
 	// Decode transaction input data
 	function decodeInput(data: string): any {
 		if (!contractInterface || !data) return null;
 		
 		try {
-			console.log('\nDecoding transaction:', data);
-			console.log('Function selector:', data.slice(0, 10));
+			const decoded = contractInterface.parseTransaction({ data });
 			
-			// Log available functions
-			try {
-				const fragment = contractInterface.getFunction('updateTemporalNumericValuesV1');
-				if (fragment) {
-					console.log('Update function details:', {
-						name: fragment.name,
-						selector: fragment.selector,
-						format: fragment.format()
-					});
-				} else {
-					console.log('Update function not found in interface');
-				}
-			} catch (e) {
-				console.log('Could not find update function');
-			}
+			if (!decoded) return null;
 			
-			try {
-				const decoded = contractInterface.parseTransaction({ data });
-				console.log('Successfully decoded:', decoded);
-				
-				if (!decoded) return null;
-				
+			// Only process updateTemporalNumericValuesV1 calls
+			if (decoded.name === 'updateTemporalNumericValuesV1') {
 				return {
 					name: decoded.name,
-					args: decoded.args
+					updates: processUpdateData(decoded.args)
 				};
-			} catch (e) {
-				console.log('Failed to decode:', e);
-				return null;
 			}
+			
+			return null;
 		} catch (e) {
 			console.warn('Error in decode process:', e);
 			return null;
 		}
 	}
-	
+
 	// Handle BigInt serialization
 	function jsonReplacer(key: string, value: any) {
 		if (typeof value === 'bigint') {
@@ -128,17 +136,20 @@
 		if (!tx.to || tx.to.toLowerCase() === contractAddress.toLowerCase()) {
 			const decodedInput = tx.data ? decodeInput(tx.data) : null;
 			
-			transactionStore.update(txs => {
-				// Check if we already have this transaction
-				if (!txs.find(t => t.hash === tx.hash)) {
-					const enrichedTx = {
-						...tx,
-						decodedInput
-					};
-					return [enrichedTx, ...txs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
-				}
-				return txs;
-			});
+			// Only keep transactions with successful decoding (updateTemporalNumericValuesV1 calls)
+			if (decodedInput) {
+				transactionStore.update(txs => {
+					// Check if we already have this transaction
+					if (!txs.find(t => t.hash === tx.hash)) {
+						const enrichedTx = {
+							...tx,
+							decodedInput
+						};
+						return [enrichedTx, ...txs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
+					}
+					return txs;
+				});
+			}
 		}
 	}
 
@@ -467,9 +478,7 @@
 							<th>Block</th>
 							<th>Hash</th>
 							<th>From</th>
-							<th>Type</th>
-							<th>Function</th>
-							<th>Arguments</th>
+							<th>Updates</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -478,14 +487,23 @@
 								<td>{tx.blockNumber}</td>
 								<td class="font-mono text-xs break-all whitespace-normal">{tx.hash}</td>
 								<td class="font-mono break-all">{tx.from}</td>
-								<td>{!tx.to ? 'Creation' : 'Incoming'}</td>
-								<td class="font-mono">{tx.decodedInput?.name || 'Unknown'}</td>
 								<td class="font-mono break-all">
-									<div class="max-h-32 overflow-y-auto">
-										{#if tx.decodedInput?.args}
-											<pre class="text-xs">{JSON.stringify(tx.decodedInput.args, jsonReplacer, 2)}</pre>
+									<div class="max-h-96 overflow-y-auto">
+										{#if tx.decodedInput?.updates}
+											<div class="space-y-2">
+												{#each tx.decodedInput.updates as update}
+													<div class="p-2 bg-surface-200/50 rounded">
+														<div>ID: {update.id}</div>
+														<div>Time: {update.timestamp}</div>
+														<div>Value: {update.value}</div>
+														<div class="text-xs text-surface-600">
+															Raw: {update.rawValue} @ {update.rawTimestamp}ns
+														</div>
+													</div>
+												{/each}
+											</div>
 										{:else}
-											{tx.data}
+											Creation Transaction
 										{/if}
 									</div>
 								</td>
