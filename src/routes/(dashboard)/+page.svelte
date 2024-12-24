@@ -15,6 +15,7 @@
 	let contractInterface: ethers.Interface | null = null;
 	let wsConnected = false;
 	let wsError: string | null = null;
+	let assetIdMap: Map<string, string> = new Map();
 
 	// Create a writable store for transactions
 	const transactionStore: Writable<any[]> = writable([]);
@@ -81,12 +82,40 @@
 		return value.toString();
 	}
 
+	// Fetch asset IDs and create lookup map
+	async function fetchAssetIds() {
+		try {
+			const response = await fetch('/api/assets');
+			const { data: assetIds } = await response.json();
+			
+			console.log('Fetched asset IDs:', assetIds);
+			
+			// Create lookup map of hash => plaintext
+			assetIdMap = new Map(
+				assetIds.map((id: string) => [
+					ethers.keccak256(ethers.toUtf8Bytes(id)),
+					id
+				])
+			);
+			
+			console.log('Created asset ID map with', assetIdMap.size, 'entries');
+		} catch (e) {
+			console.error('Error fetching asset IDs:', e);
+		}
+	}
+
+	// Get plaintext asset ID from hash
+	function getAssetName(hash: string): string {
+		return assetIdMap.get(hash.toLowerCase()) || hash;
+	}
+
 	// Process update data into a more readable format
 	function processUpdateData(args: any[]): any {
 		if (!args || !args[0]) return null;
 		
 		const updates = args[0].map((update: any) => ({
 			id: update.id,
+			assetName: getAssetName(update.id),
 			timestamp: formatTimestamp(update.temporalNumericValue.timestampNs),
 			value: formatValue(update.temporalNumericValue.quantizedValue),
 			rawTimestamp: update.temporalNumericValue.timestampNs.toString(),
@@ -207,6 +236,10 @@
 		abortController = new AbortController();
 		
 		try {
+			// Fetch asset IDs first
+			progress = 'Fetching asset IDs...';
+			await fetchAssetIds();
+			
 			progress = 'Fetching chain info...';
 			const chainlistResponse = await fetch(`https://chainid.network/chains.json`);
 			const chains = await chainlistResponse.json();
@@ -493,7 +526,8 @@
 											<div class="space-y-2">
 												{#each tx.decodedInput.updates as update}
 													<div class="p-2 bg-surface-200/50 rounded">
-														<div>ID: {update.id}</div>
+														<div>Asset: {update.assetName}</div>
+														<div class="text-xs text-surface-600">ID: {update.id}</div>
 														<div>Time: {update.timestamp}</div>
 														<div>Value: {update.value}</div>
 														<div class="text-xs text-surface-600">
