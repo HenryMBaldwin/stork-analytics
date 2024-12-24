@@ -428,7 +428,7 @@
 			
 			// Search backwards in chunks until we find the contract creation
 			for (let block = latestBlock; block > 0 && !abortController?.signal.aborted;) {
-				const fromBlock = Math.max(0, block - chunkSize);
+				const fromBlock = Math.max(0, block - chunkSize + 1); // +1 to ensure overlap
 				progress = `Fetching logs for blocks ${fromBlock.toLocaleString()} to ${block.toLocaleString()} of ${latestBlock.toLocaleString()}...`;
 				
 				try {
@@ -515,8 +515,8 @@
 						}
 					}
 					
-					// Move to next chunk
-					block -= chunkSize;
+					// Move to next chunk, ensuring we don't skip any blocks
+					block = fromBlock - 1;
 					
 				} catch (e: any) {
 					console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
