@@ -1709,6 +1709,20 @@
 		@apply font-bold text-lg leading-none;
 	}
 
+	/* Table styles with dark mode support */
+	:global(.dark) .table-container table {
+		@apply border-surface-500;
+	}
+
+	:global(.dark) .table-container th,
+	:global(.dark) .table-container td {
+		@apply border-surface-500;
+	}
+
+	:global(.dark) .card {
+		@apply border border-surface-500;
+	}
+
 	/* Responsive table styles */
 	@media (max-width: 640px) {
 		.table-container table {
@@ -1722,6 +1736,10 @@
 
 		.table-container tr {
 			@apply block border-b border-surface-300 mb-4;
+		}
+
+		:global(.dark) .table-container tr {
+			@apply border-surface-500;
 		}
 
 		.table-container td {

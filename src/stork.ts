@@ -32,16 +32,16 @@ export const stork: CustomThemeConfig = {
 		"--color-primary-800": "106 151 146", // #6a9792
 		"--color-primary-900": "87 123 119", // #577b77
 		// secondary | #B1FCF3 
-		"--color-secondary-50": "243 255 253", // #f3fffd
-		"--color-secondary-100": "239 254 253", // #effefd
-		"--color-secondary-200": "236 254 252", // #ecfefc
-		"--color-secondary-300": "224 254 250", // #e0fefa
-		"--color-secondary-400": "200 253 247", // #c8fdf7
-		"--color-secondary-500": "177 252 243", // #B1FCF3
-		"--color-secondary-600": "159 227 219", // #9fe3db
-		"--color-secondary-700": "133 189 182", // #85bdb6
-		"--color-secondary-800": "106 151 146", // #6a9792
-		"--color-secondary-900": "87 123 119", // #577b77
+		"--color-secondary-50": "217 219 226", // #d9dbe2
+		"--color-secondary-100": "204 208 217", // #ccd0d9
+		"--color-secondary-200": "191 196 207", // #bfc4cf
+		"--color-secondary-300": "153 160 179", // #99a0b3
+		"--color-secondary-400": "77 89 121", // #4d5979
+		"--color-secondary-500": "0 18 64", // #001240
+		"--color-secondary-600": "0 16 58", // #00103a
+		"--color-secondary-700": "0 14 48", // #000e30
+		"--color-secondary-800": "0 11 38", // #000b26
+		"--color-secondary-900": "0 9 31", // #00091f
 		// tertiary | #B1FCF3 
 		"--color-tertiary-50": "243 255 253", // #f3fffd
 		"--color-tertiary-100": "239 254 253", // #effefd
