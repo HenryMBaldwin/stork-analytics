@@ -23,4 +23,4 @@
 </script>
 
 <!-- App Shell -->
-<slot />s
+<slot />

@@ -10,6 +10,7 @@
 
 	// Store for asset data
 	const assetStore = writable<[string, string][]>([]);
+	let isDarkMode = false;
 
 	// Format encoded ID to show first 6 and last 4 chars
 	function formatEncodedId(encoded: string) {
@@ -51,8 +52,32 @@
 		}
 	}
 
-	// Fetch assets and set up resize observer
+	// Listen for theme changes from parent
 	onMount(() => {
+		const handleMessage = (event: MessageEvent) => {
+			if (event.data?.type === 'theme') {
+				console.log('Received theme update:', event.data.isDark);
+				document.documentElement.style.setProperty('--table-bg', event.data.isDark ? '#1e1e1e' : '#ffffff');
+				document.documentElement.style.setProperty('--table-border', event.data.isDark ? '#18181b' : '#6b7280');
+				document.documentElement.style.setProperty('--table-header-bg', event.data.isDark ? '#27272a' : '#f3f4f6');
+				document.documentElement.style.setProperty('--table-row-bg', event.data.isDark ? '#27272a' : '#ffffff');
+				document.documentElement.style.setProperty('--table-alt-row-bg', event.data.isDark ? '#303034' : '#f9fafb');
+				document.documentElement.style.setProperty('--table-text', event.data.isDark ? '#ffffff' : '#000000');
+			}
+		};
+		window.addEventListener('message', handleMessage);
+		
+		// Request initial theme from parent
+		window.parent.postMessage({ type: 'requestTheme' }, '*');
+
+		// Set up resize observer
+		const resizeObserver = new ResizeObserver(sendHeight);
+		const tableContainer = document.querySelector('.table-container');
+		if (tableContainer) {
+			resizeObserver.observe(tableContainer);
+		}
+
+		// Fetch assets
 		fetch('/api/assets')
 			.then(response => response.json())
 			.then(({ data: assetIds }) => {
@@ -65,13 +90,10 @@
 			})
 			.catch(e => console.error('Error fetching asset IDs:', e));
 
-		const resizeObserver = new ResizeObserver(sendHeight);
-		const tableContainer = document.querySelector('.table-container');
-		if (tableContainer) {
-			resizeObserver.observe(tableContainer);
-		}
-
-		return () => resizeObserver.disconnect();
+		return () => {
+			window.removeEventListener('message', handleMessage);
+			resizeObserver.disconnect();
+		};
 	});
 </script>
 
@@ -81,6 +103,7 @@
 		<input
 			type="text"
 			class="input w-full"
+			
 			placeholder="Search assets..."
 			bind:value={searchQuery}
 		/>
@@ -142,78 +165,62 @@
 		padding: 0;
 	}
 
+	:root {
+		--table-bg: #ffffff;
+		--table-border: #6b7280;
+		--table-header-bg: #f3f4f6;
+		--table-row-bg: #ffffff;
+		--table-alt-row-bg: #f9fafb;
+		--table-text: #000000;
+	}
+
 	/* Table styles */
 	.table {
 		@apply w-full border-collapse;
+		background-color: var(--table-bg);
+		border-color: var(--table-border);
+		color: var(--table-text);
 	}
 
-	.table th,
+	.table th {
+		border: 1px solid var(--table-border);
+		@apply p-2 text-left whitespace-nowrap;
+		background-color: var(--table-header-bg);
+	}
+
 	.table td {
-		@apply border border-secondary-500 p-2;
-		@apply text-left;
-		@apply whitespace-nowrap;
+		border: 1px solid var(--table-border);
+		@apply p-2 text-left whitespace-nowrap;
+		background-color: var(--table-row-bg);
 	}
 
-	.encoded-cell {
-		position: relative;
-	}
-
-	.encoded-cell .short-id {
-		display: none;
-	}
-
-	.encoded-cell .full-id {
-		display: block;
-	}
-
-	@media (max-width: 800px) {
-		.encoded-cell .short-id {
-			display: block;
-		}
-		.encoded-cell .full-id {
-			display: none;
-		}
-		td:first-child {
-			width: 50% !important;
-		}
-		td:last-child {
-			width: 50% !important;
-		}
-		th:first-child {
-			width: 50% !important;
-		}
-		th:last-child {
-			width: 50% !important;
-		}
+	.table tr:nth-child(even) td {
+		background-color: var(--table-alt-row-bg);
 	}
 
 	.card {
-		@apply border border-secondary-500;
+		border: 1px solid var(--table-border);
+		background-color: var(--table-bg);
 	}
 
-	:global(.dark) .table {
-		@apply border-primary-900 bg-surface-700;
-	}
-
-	:global(.dark) .table th {
-		@apply border-primary-900 bg-surface-800;
-	}
-
-	:global(.dark) .table td {
-		@apply border-primary-900 bg-surface-700;
-	}
-
-	:global(.dark) .table tr:nth-child(even) td {
-		@apply bg-surface-800;
-	}
-
-	:global(.dark) .card {
-		@apply border-primary-900;
+	.input {
+		background-color: var(--table-row-bg);
+		border-color: var(--table-border);
+		color: var(--table-text);
 	}
 
 	.copy-button {
 		@apply opacity-50 hover:opacity-100 transition-opacity;
-		@apply p-1 rounded hover:bg-surface-500/20;
+		@apply p-1 rounded;
+		color: var(--table-text);
+	}
+
+	.copy-button:hover {
+		background-color: color-mix(in srgb, var(--table-text) 20%, transparent);
+	}
+
+	.encoded-cell {
+		position: relative;
 	}
 
 	.encoded-cell div {
