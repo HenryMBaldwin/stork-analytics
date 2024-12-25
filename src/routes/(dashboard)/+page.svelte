@@ -1205,7 +1205,7 @@
 						{/if}
 					</button>
 				{:else if lastCheckedBlock !== null}
-					<button type="button" class="btn variant-filled-secondary w-full sm:w-auto" disabled={!scanTxs && !scanAssets} on:click={refreshTransactions}>
+					<button type="button" class="btn variant-filled-primary w-full sm:w-auto" disabled={!scanTxs && !scanAssets} on:click={refreshTransactions}>
 						<div class="flex items-center gap-2 justify-center">
 							<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 								<path d="M21 2v6h-6"></path>
@@ -1697,7 +1697,7 @@
 	}
 	
 	.spinner-border {
-		@apply w-8 h-8 border-4 border-primary-500 border-r-transparent rounded-full animate-spin;
+		@apply w-8 h-8 border-4 border-primary-900 border-r-transparent rounded-full animate-spin;
 	}
 
 	/* Sort button styles */
@@ -1710,17 +1710,37 @@
 	}
 
 	/* Table styles with dark mode support */
-	:global(.dark) .table-container table {
-		@apply border-surface-500;
+	.table-container table {
+		@apply border-secondary-500;
 	}
 
-	:global(.dark) .table-container th,
+	.table-container th,
+	.table-container td {
+		@apply border-secondary-500;
+	}
+
+	.card {
+		@apply border border-secondary-500;
+	}
+
+	:global(.dark) .table-container table {
+		@apply border-primary-900 bg-surface-700;
+	}
+
+	:global(.dark) .table-container th {
+		@apply border-primary-900 bg-surface-800;
+	}
+
 	:global(.dark) .table-container td {
-		@apply border-surface-500;
+		@apply border-primary-900 bg-surface-700;
+	}
+
+	:global(.dark) .table-container tr:nth-child(even) td {
+		@apply bg-surface-800;
 	}
 
 	:global(.dark) .card {
-		@apply border border-surface-500;
+		@apply border border-primary-900;
 	}
 
 	/* Responsive table styles */
@@ -1735,11 +1755,11 @@
 		}
 
 		.table-container tr {
-			@apply block border-b border-surface-300 mb-4;
+			@apply block border-b border-secondary-500 mb-4;
 		}
 
 		:global(.dark) .table-container tr {
-			@apply border-surface-500;
+			@apply border-primary-900;
 		}
 
 		.table-container td {
