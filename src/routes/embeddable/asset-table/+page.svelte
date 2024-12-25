@@ -91,8 +91,8 @@
 		<table class="table table-compact w-full">
 			<thead>
 				<tr>
-					<th class="w-[200px] min-w-[200px]">Asset ID</th>
-					<th>Encoded ID</th>
+					<th class="w-[33%] min-w-[200px]">Asset ID</th>
+					<th class="w-[67%] min-w-[200px]">Encoded ID</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -105,23 +105,27 @@
 				{:else}
 					{#each filteredAssets as [plaintext, encoded]}
 						<tr>
-							<td class="truncate">{plaintext}</td>
-							<td class="font-mono text-sm encoded-cell" title={encoded}>
-								<div class="flex items-center gap-2">
-									<div class="min-w-0 flex-1">
-										<span class="full-id block truncate">{encoded}</span>
-										<span class="short-id block truncate">{formatEncodedId(encoded)}</span>
+							<td class="w-[33%] min-w-[200px] truncate">{plaintext}</td>
+							<td class="w-[67%] min-w-[200px] font-mono text-sm encoded-cell" title={encoded}>
+								<div class="flex items-center">
+									<div class="min-w-0 flex-1 flex flex-row justify-start">
+										<div class="flex items-center gap-1 hidden md:block">
+											<span class="full-id truncate text-sm">{encoded}</span>
+										</div>
+										<div class="flex items-center gap-1">
+											<span class="short-id truncate text-sm">{formatEncodedId(encoded)}</span>
+											<button
+												class="copy-button flex-none"
+												on:click={() => copyToClipboard(encoded)}
+												title="Copy encoded ID"
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+													<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+													<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+												</svg>
+											</button>
+										</div>
 									</div>
-									<button
-										class="copy-button flex-none"
-										on:click={() => copyToClipboard(encoded)}
-										title="Copy encoded ID"
-									>
-										<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-											<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-											<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-										</svg>
-									</button>
 								</div>
 							</td>
 						</tr>
@@ -168,6 +172,18 @@
 		}
 		.encoded-cell .full-id {
 			display: none;
+		}
+		td:first-child {
+			width: 50% !important;
+		}
+		td:last-child {
+			width: 50% !important;
+		}
+		th:first-child {
+			width: 50% !important;
+		}
+		th:last-child {
+			width: 50% !important;
 		}
 	}
 
@@ -218,6 +234,18 @@
 		}
 		.encoded-cell .full-id {
 			display: none;
+		}
+		td:first-child {
+			width: 50% !important;
+		}
+		td:last-child {
+			width: 50% !important;
+		}
+		th:first-child {
+			width: 50% !important;
+		}
+		th:last-child {
+			width: 50% !important;
 		}
 	}
 </style> 
