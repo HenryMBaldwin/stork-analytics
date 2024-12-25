@@ -1284,7 +1284,7 @@
 				<div class="card p-4">
 					<div class="flex justify-between items-center mb-4">
 						<h3 class="h3">Network Overview</h3>
-						<button class="btn btn-sm variant-ghost-primary" on:click={() => $showDetails.network = !$showDetails.network}>
+						<button class="btn btn-sm variant-filled-primary" on:click={() => $showDetails.network = !$showDetails.network}>
 							{$showDetails.network ? 'Hide' : 'Show'} Details
 						</button>
 					</div>
@@ -1294,12 +1294,18 @@
 							<div class="text-2xl font-bold">{$assetStatsStore.size}</div>
 							<div class="text-sm">Total Assets</div>
 							{#if $showDetails.network}
-								<div class="mt-4 space-y-1">
+								<div class="mt-4">
 									<div class="font-semibold mb-2">Asset List:</div>
-									<div class="max-h-48 overflow-y-auto">
-										{#each [...$assetStatsStore.keys()] as assetName, i}
-											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'}">{assetName}</div>
-										{/each}
+									<div class="table-container max-h-48 overflow-y-auto">
+										<table class="table table-compact">
+											<tbody>
+												{#each [...$assetStatsStore.keys()] as assetName}
+													<tr>
+														<td>{assetName}</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
 									</div>
 								</div>
 							{/if}
@@ -1313,17 +1319,21 @@
 								{formatGas($aggregateStatsStore.totalGas)} gas used
 							</div>
 							{#if $showDetails.network}
-								<div class="mt-4 space-y-2">
-									<div class="font-semibold">Transaction Details:</div>
-									<div class="p-1 rounded bg-surface-100/50">
+								<div class="mt-4">
+									<div class="font-semibold mb-2">Transaction Details:</div>
+									<div class="text-sm mb-2">
 										Unique Transactions: {new Set($transactionStore.map(tx => tx.hash)).size}
 									</div>
-									<div class="max-h-48 overflow-y-auto">
-										{#each $transactionStore as tx, i}
-											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-												{tx.hash}
-											</div>
-										{/each}
+									<div class="table-container max-h-48 overflow-y-auto">
+										<table class="table table-compact">
+											<tbody>
+												{#each $transactionStore as tx}
+													<tr>
+														<td class="font-mono text-xs break-all">{tx.hash}</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
 									</div>
 								</div>
 							{/if}
@@ -1337,20 +1347,26 @@
 								{formatGas($aggregateStatsStore.totalGas / $aggregateStatsStore.totalUniqueUpdaters.size)} gas/updater
 							</div>
 							{#if $showDetails.network}
-								<div class="mt-4 space-y-1">
+								<div class="mt-4">
 									<div class="font-semibold mb-2">Updater List:</div>
-									<div class="max-h-48 overflow-y-auto">
-										{#each [...$aggregateStatsStore.totalUniqueUpdaters] as address, i}
-											<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-												<div>{address}</div>
-												{#if $aggregateStatsStore.updaterGasStats.get(address)}
-													<div class="text-surface-400">
-														Gas: {formatGas($aggregateStatsStore.updaterGasStats.get(address)?.totalGas || 0)}
-														({formatGas($aggregateStatsStore.updaterGasStats.get(address)?.averageGas || 0)}/update)
-													</div>
-												{/if}
-											</div>
-										{/each}
+									<div class="table-container max-h-48 overflow-y-auto">
+										<table class="table table-compact">
+											<tbody>
+												{#each [...$aggregateStatsStore.totalUniqueUpdaters] as address}
+													<tr>
+														<td>
+															<div class="font-mono text-xs break-all">{address}</div>
+															{#if $aggregateStatsStore.updaterGasStats.get(address)}
+																<div class="text-surface-400">
+																	Gas: {formatGas($aggregateStatsStore.updaterGasStats.get(address)?.totalGas || 0)}
+																	({formatGas($aggregateStatsStore.updaterGasStats.get(address)?.averageGas || 0)}/update)
+																</div>
+															{/if}
+														</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
 									</div>
 								</div>
 							{/if}
@@ -1383,7 +1399,7 @@
 								<h3 class="h3">{stats.assetName}</h3>
 								<div class="flex items-center gap-4">
 									<div class="badge variant-filled">{stats.updateCount} updates</div>
-									<button class="btn btn-sm variant-ghost-primary" on:click={() => {
+									<button class="btn btn-sm variant-filled-primary" on:click={() => {
 										showDetails.update(details => {
 											const newAssets = new Map(details.assets);
 											const currentDetails = newAssets.get(assetId) || { shown: false, showHashes: false };
@@ -1448,17 +1464,25 @@
 									<div>{stats.uniqueUpdaters.size}</div>
 									{#if $showDetails.assets.get(assetId)?.shown}
 										<div class="mt-4 space-y-1 max-h-48 overflow-y-auto text-sm">
-											{#each [...stats.uniqueUpdaters] as address, i}
-												<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-													<div>{address}</div>
-													{#if stats.updaterGasStats.get(address)}
-														<div class="text-surface-400">
-															Gas: {formatGas(stats.updaterGasStats.get(address)?.totalGas || 0)}
-															({formatGas(stats.updaterGasStats.get(address)?.averageGas || 0)}/update)
-														</div>
-													{/if}
-												</div>
-											{/each}
+											<div class="table-container">
+												<table class="table table-compact">
+													<tbody>
+														{#each [...stats.uniqueUpdaters] as address}
+															<tr>
+																<td>
+																	<div class="font-mono text-xs break-all">{address}</div>
+																	{#if stats.updaterGasStats.get(address)}
+																		<div class="text-surface-400">
+																			Gas: {formatGas(stats.updaterGasStats.get(address)?.totalGas || 0)}
+																			({formatGas(stats.updaterGasStats.get(address)?.averageGas || 0)}/update)
+																		</div>
+																	{/if}
+																</td>
+															</tr>
+														{/each}
+													</tbody>
+												</table>
+											</div>
 										</div>
 									{/if}
 								</div>
@@ -1472,8 +1496,8 @@
 										({formatGas(stats.totalGas / stats.updateCount)}/update)
 									</div>
 									{#if $showDetails.assets.get(assetId)?.shown}
-										<div class="mt-4 space-y-2">
-											<div class="flex justify-between items-center">
+										<div class="mt-4">
+											<div class="flex justify-between items-center mb-2">
 												<div class="text-sm font-semibold">Updates:</div>
 												<button class="btn btn-sm variant-glass-primary" on:click={() => {
 													showDetails.update(details => {
@@ -1486,26 +1510,34 @@
 													Show {$showDetails.assets.get(assetId)?.showHashes ? 'Values' : 'Tx Hashes'}
 												</button>
 											</div>
-											<div class="max-h-48 overflow-y-auto">
-												{#if $showDetails.assets.get(assetId)?.showHashes}
-													{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
-														<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-															{update.txHash}
-															<div class="text-surface-400">Gas: {formatGas(update.gasUsed)}</div>
-														</div>
-													{/each}
-												{:else}
-													{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update, i}
-														<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-															<div>Value: {update.value}</div>
-															<div>{new Date(update.timestamp).toLocaleString()}</div>
-															<div class="text-surface-400">
-																{formatTimeAgo(update.timestamp)}
-																• Gas: {formatGas(update.gasUsed)}
-															</div>
-														</div>
-													{/each}
-												{/if}
+											<div class="table-container max-h-48 overflow-y-auto">
+												<table class="table table-compact">
+													<tbody>
+														{#if $showDetails.assets.get(assetId)?.showHashes}
+															{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update}
+																<tr>
+																	<td>
+																		<div class="font-mono text-xs break-all">{update.txHash}</div>
+																		<div class="text-surface-400">Gas: {formatGas(update.gasUsed)}</div>
+																	</td>
+																</tr>
+															{/each}
+														{:else}
+															{#each stats.updates.sort((a, b) => b.timestamp - a.timestamp) as update}
+																<tr>
+																	<td>
+																		<div>Value: {update.value}</div>
+																		<div>{new Date(update.timestamp).toLocaleString()}</div>
+																		<div class="text-surface-400">
+																			{formatTimeAgo(update.timestamp)}
+																			• Gas: {formatGas(update.gasUsed)}
+																		</div>
+																	</td>
+																</tr>
+															{/each}
+														{/if}
+													</tbody>
+												</table>
 											</div>
 										</div>
 									{/if}

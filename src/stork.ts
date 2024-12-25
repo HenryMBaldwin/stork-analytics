@@ -9,7 +9,7 @@ export const stork: CustomThemeConfig = {
 		"--theme-font-color-base": "0 0 0",
 		"--theme-font-color-dark": "255 255 255",
 		"--theme-rounded-base": "8px",
-		"--theme-rounded-container": "8px",
+		"--theme-rounded-container": "0px",
 		"--theme-border-base": "1px",
 		// =~= Theme On-X Colors =~=
 		"--on-primary": "0 0 0",
@@ -87,16 +87,16 @@ export const stork: CustomThemeConfig = {
 		"--color-error-800": "126 9 34", // #7e0922
 		"--color-error-900": "103 7 28", // #67071c
 		// surface | #001240 
-		"--color-surface-50": "217 219 226", // #d9dbe2
-		"--color-surface-100": "204 208 217", // #ccd0d9
-		"--color-surface-200": "191 196 207", // #bfc4cf
-		"--color-surface-300": "153 160 179", // #99a0b3
-		"--color-surface-400": "77 89 121", // #4d5979
-		"--color-surface-500": "0 18 64", // #001240
-		"--color-surface-600": "0 16 58", // #00103a
-		"--color-surface-700": "0 14 48", // #000e30
-		"--color-surface-800": "0 11 38", // #000b26
-		"--color-surface-900": "0 9 31", // #00091f
+		"--color-surface-50": "255 255 255", // 
+		"--color-surface-100": "245 245 245", // 
+		"--color-surface-200": "200 200 200", // #c8c8c8
+		"--color-surface-300": "167 167 167", // #a7a7a7
+		"--color-surface-400": "101 101 101", // #656565
+		"--color-surface-500": "35 35 35", // #232323
+		"--color-surface-600": "32 32 32", // #202020
+		"--color-surface-700": "26 26 26", // #1a1a1a
+		"--color-surface-800": "21 21 21", // #151515
+		"--color-surface-900": "17 17 17", // #111111
 		
 	}
 }
