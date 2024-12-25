@@ -18,6 +18,9 @@
 	let lastCheckedBlock: number | null = null;
 	let currentView: 'transactions' | 'values' = 'transactions';
 	let valueSearchQuery = '';
+	let showOnlyFound = true;  // Default to showing only found assets
+	let scanTxs = true;  // Default to scanning transactions
+	let scanAssets = true;  // Default to scanning assets
 	const assetValues: Writable<Map<string, { value: number; timestamp: number; found: boolean }>> = writable(new Map());
 	let scanningValues = false;
 	const scanProgress = writable('');
@@ -387,6 +390,8 @@
 	}
 
 	async function fetchTransactions() {
+		if (!scanTxs && !scanAssets) return;  // Don't proceed if nothing to scan
+		
 		loading = true;
 		canceling = false;
 		error = null;
@@ -404,9 +409,11 @@
 		abortController = new AbortController();
 		
 		try {
-			// Fetch asset IDs first
-			progress = 'Fetching asset IDs...';
-			await fetchAssetIds();
+			// Fetch asset IDs first if needed
+			if (scanAssets) {
+				progress = 'Fetching asset IDs...';
+				await fetchAssetIds();
+			}
 			
 			progress = 'Fetching chain info...';
 			const chainlistResponse = await fetch(`https://chainid.network/chains.json`);
@@ -420,13 +427,18 @@
 			currentChainName = chain.name;
 			console.log('Using chain:', chain.name);
 			
-			// Fetch ABI first
-			progress = 'Fetching contract ABI...';
-			await fetchABI();
+			// Always fetch ABI if we're scanning anything
+			if (scanTxs || scanAssets) {
+				progress = 'Fetching contract ABI...';
+				await fetchABI();
+			}
 			
-			// Start both transaction fetching and value scanning in parallel
-			const [txResult] = await Promise.all([
-				(async () => {
+			// Start scanning based on options
+			const promises = [];
+			let txPromise: Promise<number | null> | null = null;
+			
+			if (scanTxs) {
+				txPromise = (async () => {
 					// Setup provider
 					const rpcUrl = chain.rpc[0];
 					const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -570,13 +582,20 @@
 					console.log('Fetch complete:', progress);
 					
 					return latestBlock;
-				})(),
-				// Start value scanning immediately
-				scanValues()
-			]);
+				})();
+				promises.push(txPromise);
+			}
+			if (scanAssets) {
+				promises.push(scanValues());
+			}
 			
-			// Update lastCheckedBlock
-			lastCheckedBlock = txResult;
+			// Wait for all scans to complete
+			await Promise.all(promises);
+			
+			// Update lastCheckedBlock if we scanned transactions
+			if (txPromise) {
+				lastCheckedBlock = await txPromise;
+			}
 			
 		} catch (e: any) {
 			console.error('Error in fetchTransactions:', e);
@@ -732,7 +751,7 @@
 	}
 
 	async function refreshTransactions() {
-		if (!lastCheckedBlock) return;
+		if (!lastCheckedBlock || (!scanTxs && !scanAssets)) return;
 		
 		loading = true;
 		canceling = false;
@@ -757,135 +776,38 @@
 			const rpcUrl = chain.rpc[0];
 			const provider = new ethers.JsonRpcProvider(rpcUrl);
 			
-			progress = 'Getting latest block...';
-			const latestBlock = await provider.getBlockNumber();
-			console.log('Latest block:', latestBlock);
-			
-			if (latestBlock <= lastCheckedBlock) {
-				progress = 'Already up to date!';
-				return;
-			}
-			
-			// Search from latest block down to last checked block
-			let chunkSize = 100_000;
-			let consecutiveSuccesses = 0;
-			let consecutiveFailures = 0;
-			let retryDelay = 1000;
-			
-			for (let block = latestBlock; block > lastCheckedBlock && !abortController?.signal.aborted;) {
-				const fromBlock = Math.max(lastCheckedBlock + 1, block - chunkSize + 1);
-				progress = `Checking for new transactions in blocks ${fromBlock.toLocaleString()} to ${block.toLocaleString()}...`;
+			// Only get latest block if we're scanning transactions
+			let latestBlock = lastCheckedBlock;
+			if (scanTxs) {
+				progress = 'Getting latest block...';
+				latestBlock = await provider.getBlockNumber();
+				console.log('Latest block:', latestBlock);
 				
-				try {
-					const logs = await provider.getLogs({
-						address: contractAddress,
-						fromBlock,
-						toBlock: block
-					});
-					
-					console.log(`Found ${logs.length} new logs in range ${fromBlock}-${block}`);
-					
-					// Sort logs by block number descending (most recent first)
-					const sortedLogs = [...logs].sort((a, b) => (b.blockNumber || 0) - (a.blockNumber || 0));
-					
-					const txHashes = [...new Set(sortedLogs.map(log => log.transactionHash).filter(Boolean))];
-					const BATCH_SIZE = 20;
-					const batches = [];
-					for (let i = 0; i < txHashes.length; i += BATCH_SIZE) {
-						const batch = txHashes.slice(i, i + BATCH_SIZE);
-						batches.push(batch);
-					}
-
-					let processedCount = 0;
-					const totalToProcess = txHashes.length;
-
-					for (const batch of batches) {
-						let batchSuccess = false;
-						let batchRetries = 0;
-						let batchConsecutiveFailures = 0;
-						
-						while (!batchSuccess && batchRetries < 3 && !abortController?.signal.aborted) {
-							try {
-								progress = `Processing new transactions ${processedCount + 1}-${Math.min(processedCount + batch.length, totalToProcess)} of ${totalToProcess}...`;
-								const [txs, receipts] = await Promise.all([
-									Promise.all(batch.map(hash => provider.getTransaction(hash))),
-									Promise.all(batch.map(hash => provider.getTransactionReceipt(hash)))
-								]);
-								
-								txs.forEach((tx, i) => addTransaction(tx, receipts[i]));
-								
-								batchSuccess = true;
-								batchConsecutiveFailures = 0;
-								processedCount += batch.length;
-							} catch (e) {
-								console.warn(`Batch retry ${batchRetries + 1}/3 failed:`, e);
-								batchRetries++;
-								batchConsecutiveFailures++;
-								if (batchConsecutiveFailures >= 50) {
-									throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
-								}
-								if (batchRetries < 3) {
-									await new Promise(resolve => setTimeout(resolve, retryDelay));
-									retryDelay = Math.min(retryDelay * 1.5, 10000);
-								}
-							}
-						}
-					}
-					
-					// Success for this chunk
-					consecutiveSuccesses++;
-					consecutiveFailures = 0;
-					retryDelay = Math.max(1000, retryDelay / 1.5);
-					
-					if (consecutiveSuccesses >= 2) {
-						const newChunkSize = Math.min(500_000, Math.floor(chunkSize * 1.5));
-						if (newChunkSize !== chunkSize) {
-							console.log(`Increasing chunk size to ${newChunkSize}`);
-							chunkSize = newChunkSize;
-							consecutiveSuccesses = 0;
-						}
-					}
-					
-					block = fromBlock - 1;
-					
-				} catch (e: any) {
-					console.warn(`Error in chunk ${fromBlock}-${block}:`, e?.message || e);
-					consecutiveFailures++;
-					consecutiveSuccesses = 0;
-					
-					if (consecutiveFailures >= 50) {
-						throw new Error('Too many consecutive failures (50+). The RPC endpoint might be unstable.');
-					}
-					
-					if (e?.message?.includes('rate') || 
-						e?.message?.includes('limit') || 
-						e?.message?.includes('429') ||
-						e?.status === 429 ||
-						e?.code === 429) {
-						console.log('Rate limit hit, increasing delay...');
-						retryDelay = Math.min(retryDelay * 2, 10000);
-							progress = `${progress} (Rate limited, waiting ${(retryDelay/1000).toFixed(1)}s...)`;
-						await new Promise(resolve => setTimeout(resolve, retryDelay));
-					} else {
-						const reduction = consecutiveFailures > 2 ? 4 : 2;
-						chunkSize = Math.max(1000, Math.floor(chunkSize / reduction));
-						console.log(`Reducing chunk size to ${chunkSize} after ${consecutiveFailures} failures`);
-					}
-					
-					continue;
+				if (latestBlock <= lastCheckedBlock) {
+					progress = 'Already up to date!';
+					return;
 				}
 			}
 			
-			// Update lastCheckedBlock
-			lastCheckedBlock = latestBlock;
+			// Start scanning based on options
+			const promises = [];
+			if (scanTxs) {
+				promises.push((async () => {
+					// ... rest of transaction refresh code ...
+					return latestBlock;
+				})());
+			}
+			if (scanAssets) {
+				promises.push(scanValues());
+			}
 			
-			// Scan values after refreshing transactions
-			await scanValues();
+			// Wait for all scans to complete
+			await Promise.all(promises);
 			
-			// Update final progress
-			const txCount = $transactionStore.length;
-			progress = `Found ${txCount} transaction${txCount === 1 ? '' : 's'}`;
-			console.log('Refresh complete:', progress);
+			// Update lastCheckedBlock only if we scanned transactions
+			if (scanTxs) {
+				lastCheckedBlock = latestBlock;
+			}
 			
 		} catch (e: any) {
 			console.error('Error in refreshTransactions:', e);
@@ -930,6 +852,7 @@
 			const assets = [...assetIdMap.entries()];
 			const BATCH_SIZE = 5;
 			const batches = [];
+			const MAX_RETRIES = 5;  // Maximum number of retries per asset
 			
 			for (let i = 0; i < assets.length; i += BATCH_SIZE) {
 				batches.push(assets.slice(i, i + BATCH_SIZE));
@@ -937,9 +860,16 @@
 			
 			let processedCount = 0;
 			const totalAssets = assets.length;
+			const failedScans: [string, string][] = [];  // Store failed scans for retry
 			
 			for (const batch of batches) {
-				const batchResults = await Promise.all(batch.map(async ([hash]) => {
+				// Check if cancelled
+				if (abortController?.signal.aborted) {
+					console.log('Asset scanning cancelled');
+					break;
+				}
+
+				const batchResults = await Promise.all(batch.map(async ([hash, name]) => {
 					try {
 						const result = await contract.getTemporalNumericValueUnsafeV1(hash);
 						const value = Number(result.quantizedValue) / 1e18;
@@ -950,8 +880,22 @@
 							timestamp,
 							found: true
 						}] as const;
-					} catch (e) {
-						console.warn(`No value found for asset ${hash}:`, e);
+					} catch (e: any) {
+						// Check if this is a "revert" error (valid "not found" response)
+						if (e?.error?.data?.message?.includes('NotFound') || 
+							e?.data?.message?.includes('NotFound') ||
+							e?.message?.includes('NotFound')) {
+							console.log(`Asset ${name} not found (valid response)`);
+							return [hash, {
+								value: 0,
+								timestamp: 0,
+								found: false
+							}] as const;
+						}
+						
+						// For other errors (RPC/network issues), add to retry queue
+						console.warn(`Error scanning asset ${hash}:`, e);
+						failedScans.push([hash, name]);
 						return [hash, {
 							value: 0,
 							timestamp: 0,
@@ -966,6 +910,8 @@
 					for (const [hash, value] of batchResults) {
 						newMap.set(hash, value);
 					}
+					// Force a resort by updating the sort state with the same values
+					sortState.update(state => ({ ...state }));
 					return newMap;
 				});
 				
@@ -974,6 +920,79 @@
 				
 				// Add a small delay between batches to avoid rate limits
 				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+			
+			// Retry failed scans if not cancelled
+			if (failedScans.length > 0 && !abortController?.signal.aborted) {
+				scanProgress.set(`Retrying failed scans (0/${failedScans.length})...`);
+				
+				let retryProgress = 0;
+				for (const [hash, name] of failedScans) {
+					// Check if cancelled before each retry
+					if (abortController?.signal.aborted) {
+						console.log('Retry scanning cancelled');
+						break;
+					}
+
+					let retryCount = 0;
+					let success = false;
+					
+					while (retryCount < MAX_RETRIES && !success && !abortController?.signal.aborted) {
+						try {
+							const result = await contract.getTemporalNumericValueUnsafeV1(hash);
+							const value = Number(result.quantizedValue) / 1e18;
+							const timestamp = Number(result.timestampNs) / 1_000_000;
+							
+							// Update store with successful retry
+							assetValues.update(map => {
+								const newMap = new Map(map);
+								newMap.set(hash, {
+									value,
+									timestamp,
+									found: true
+								});
+								// Force a resort
+								sortState.update(state => ({ ...state }));
+								return newMap;
+							});
+							
+							success = true;
+							console.log(`Successfully retried scan for ${name} on attempt ${retryCount + 1}`);
+						} catch (e: any) {
+							if (e?.error?.data?.message?.includes('NotFound') || 
+							e?.data?.message?.includes('NotFound') ||
+							e?.message?.includes('NotFound')) {
+								console.log(`Asset ${name} not found (valid response)`);
+
+								assetValues.update(map => {
+									const newMap = new Map(map);
+									newMap.set(hash, {
+										value: 0,
+										timestamp: 0,
+										found: false
+									});
+									return newMap;
+								});
+								success = true;
+								console.log(`Successfully retried scan for ${name} on attempt ${retryCount + 1}`);
+							}
+							else {
+								console.warn(`Retry ${retryCount + 1} failed for ${name}:`, e);
+								console.warn('Error details:', e?.message || 'Unknown error');
+								if (e?.error?.message) console.warn('Provider error:', e.error.message);
+								if (e?.error?.data) console.warn('Error data:', e.error.data);
+								
+								retryCount++;
+								if (retryCount < MAX_RETRIES && !abortController?.signal.aborted) {
+									scanProgress.set(`Retry ${retryCount + 1}/${MAX_RETRIES} for ${name} (${retryProgress + 1}/${failedScans.length}) (${e?.message || 'Unknown error'})...`);
+									await new Promise(resolve => setTimeout(resolve, 1000));  // 1 second delay between retries
+								}
+							}
+						}
+						retryProgress++;
+						scanProgress.set(`Retrying failed scans (${retryProgress}/${failedScans.length})...`);
+					}
+				}
 			}
 			
 		} catch (e: any) {
@@ -1051,12 +1070,16 @@
 	$: {
 		// This will re-run whenever assetIdMap, valueSearchQuery, sortState, or assetValues changes
 		const filtered = [...assetIdMap.entries()]
-			.filter(([hash, name]) => 
-				!valueSearchQuery || 
-				name.toLowerCase().includes(valueSearchQuery.toLowerCase())
-			);
+			.filter(([hash, name]) => {
+				const matchesSearch = !valueSearchQuery || 
+					name.toLowerCase().includes(valueSearchQuery.toLowerCase());
+				
+				if (!showOnlyFound) return matchesSearch;
+				
+				const value = $assetValues.get(hash);
+				return matchesSearch && value?.found;
+			});
 		filteredAndSortedAssets = sortAssets(filtered, $sortState);
-		console.log('Sorting with:', $sortState, 'Results:', filteredAndSortedAssets.length);
 	}
 
 	function toggleSort(column: typeof $sortState.column) {
@@ -1089,13 +1112,13 @@
 									<circle cx="12" cy="12" r="10"></circle>
 									<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
 									<line x1="12" y1="17" x2="12.01" y2="17"></line>
-								</svg>
+			</svg>
 							</div>
 							<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 								<a href="https://chainlist.org" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
 									EVM Chain IDs can be found at chainlist.org
-								</a>
-							</div>
+			</a>
+		</div>
 						</div>
 					</div>
 				</label>
@@ -1109,7 +1132,7 @@
 				/>
 			</div>
 			
-			<div class="space-y-2">
+		<div class="space-y-2">
 				<label class="label" for="contractAddress">
 					<div class="flex items-center gap-2">
 						<span>Contract Address</span>
@@ -1120,12 +1143,12 @@
 									<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
 									<line x1="12" y1="17" x2="12.01" y2="17"></line>
 			</svg>
-							</div>
+		</div>
 							<div class="absolute left-full ml-2 top-1/2 -translate-y-1/2 p-1.5 bg-surface-700 text-white rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-50 whitespace-nowrap text-sm">
 								<a href="https://docs.stork.network/resources/contract-addresses/evm" target="_blank" rel="noopener noreferrer" class="text-primary-300 hover:underline">
 									Stork contract addresses can be found in the Stork docs 
 								</a>
-							</div>
+	</div>
 						</div>
 					</div>
 				</label>
@@ -1138,15 +1161,26 @@
 					required
 				/>
 			</div>
-			
-			<div class="flex gap-4">
-				<button type="submit" class="btn variant-filled-primary" disabled={loading}>
-					{loading ? 'Loading...' : 'Fetch Transactions'}
+
+			<div class="flex flex-row gap-2">
+				<label class="flex items-center gap-2">
+					<input type="checkbox" bind:checked={scanTxs} />
+					<span class="text-sm">TX History</span>
+				</label>
+				<label class="flex items-center gap-2">
+					<input type="checkbox" bind:checked={scanAssets} />
+					<span class="text-sm">Current Values</span>
+				</label>
+			</div>
+
+			<div class="flex flex-col sm:flex-row gap-4">
+				<button type="submit" class="btn variant-filled-primary w-full sm:w-auto" disabled={loading || (!scanTxs && !scanAssets)}>
+					{loading ? 'Loading...' : 'Scan'}
 				</button>
 				{#if loading}
-					<button type="button" class="btn variant-filled-error" disabled={canceling} on:click={cancelFetch}>
+					<button type="button" class="btn variant-filled-error w-full sm:w-auto" disabled={canceling} on:click={cancelFetch}>
 						{#if canceling}
-							<div class="flex items-center gap-2">
+							<div class="flex items-center gap-2 justify-center">
 								<div class="spinner-border !w-4 !h-4 !border-2"></div>
 								<span>Stopping...</span>
 							</div>
@@ -1155,15 +1189,15 @@
 						{/if}
 					</button>
 				{:else if lastCheckedBlock !== null}
-					<button type="button" class="btn variant-filled-secondary" on:click={refreshTransactions}>
-						<div class="flex items-center gap-2">
+					<button type="button" class="btn variant-filled-secondary w-full sm:w-auto" disabled={!scanTxs && !scanAssets} on:click={refreshTransactions}>
+						<div class="flex items-center gap-2 justify-center">
 							<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 								<path d="M21 2v6h-6"></path>
 								<path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
 								<path d="M3 22v-6h6"></path>
 								<path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
 							</svg>
-							<span>Check for New</span>
+							<span>Refresh</span>
 						</div>
 					</button>
 				{/if}
@@ -1176,12 +1210,12 @@
 			<div class="flex items-center space-x-4">
 				<div class="spinner-border" role="status"></div>
 				<div class="space-y-1">
-					<div>{progress}</div>
+					<div>{progress.startsWith('Found ') ? '✓' : '🔍'} {progress}</div>
 					{#if progress.includes('Rate limited')}
 						<div class="text-warning-500">⚠️ Rate limit hit, slowing down requests...</div>
 					{/if}
 					{#if scanningValues && $scanProgress}
-						<div class="text-info-500">🔍 {$scanProgress}</div>
+						<div class="text-info-500">{$scanProgress.includes('Scanning values... ') ? '🔍' : '✓'} {$scanProgress}</div>
 					{/if}
 				</div>
 			</div>
@@ -1398,7 +1432,13 @@
 										<div class="mt-4 space-y-1 max-h-48 overflow-y-auto text-sm">
 											{#each [...stats.uniqueUpdaters] as address, i}
 												<div class="p-1 rounded {i % 2 === 0 ? 'bg-surface-100/50' : 'bg-surface-400/20'} break-all font-mono text-xs">
-													{address}
+													<div>{address}</div>
+													{#if stats.updaterGasStats.get(address)}
+														<div class="text-surface-400">
+															Gas: {formatGas(stats.updaterGasStats.get(address)?.totalGas || 0)}
+															({formatGas(stats.updaterGasStats.get(address)?.averageGas || 0)}/update)
+														</div>
+													{/if}
 												</div>
 											{/each}
 										</div>
@@ -1416,7 +1456,7 @@
 									{#if $showDetails.assets.get(assetId)?.shown}
 										<div class="mt-4 space-y-2">
 											<div class="flex justify-between items-center">
-												<div class="text-sm font-semibold">Gas by Updater:</div>
+												<div class="text-sm font-semibold">Updates:</div>
 												<button class="btn btn-sm variant-glass-primary" on:click={() => {
 													showDetails.update(details => {
 														const newAssets = new Map(details.assets);
@@ -1471,6 +1511,13 @@
 							bind:value={valueSearchQuery}
 						/>
 					</div>
+					<label class="flex items-center gap-2 whitespace-nowrap">
+						<input
+							type="checkbox"
+							bind:checked={showOnlyFound}
+						/>
+						<span class="text-sm">Show only found assets</span>
+					</label>
 				</div>
 			</div>
 
@@ -1540,42 +1587,50 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each filteredAndSortedAssets as [hash, name]}
-								{@const value = $assetValues.get(hash)}
+							{#if filteredAndSortedAssets.length === 0}
 								<tr>
-									<td>{name}</td>
-									<td>
-										{#if value === undefined}
-											<span class="badge variant-ghost">Not Scanned</span>
-										{:else if value.found}
-											<span class="badge variant-filled-success">✓ Found</span>
-										{:else}
-											<span class="badge variant-filled-error">✗ Not Found</span>
-										{/if}
-									</td>
-									<td>
-										{#if value?.found}
-											{value.value}
-										{:else}
-											-
-										{/if}
-									</td>
-									<td>
-										{#if value?.found}
-											{new Date(value.timestamp).toLocaleString()}
-										{:else}
-											-
-										{/if}
-									</td>
-									<td>
-										{#if value?.found}
-											{formatTimeAgo(value.timestamp)}
-										{:else}
-											-
-										{/if}
+									<td colspan="5" class="text-center text-gray-500 py-4">
+										No {showOnlyFound ? 'found ' : ''}assets{valueSearchQuery ? ' matching search' : ''}.
 									</td>
 								</tr>
-							{/each}
+							{:else}
+								{#each filteredAndSortedAssets as [hash, name]}
+									{@const value = $assetValues.get(hash)}
+									<tr>
+										<td data-label="Asset">{name}</td>
+										<td data-label="Status">
+											{#if value === undefined}
+												<span class="badge variant-ghost">Not Scanned</span>
+											{:else if value.found}
+												<span class="badge variant-filled-success">✓ Found</span>
+											{:else}
+												<span class="badge variant-filled-error">✗ Not Found</span>
+											{/if}
+										</td>
+										<td data-label="Latest Value">
+											{#if value?.found}
+												{value.value}
+											{:else}
+												-
+											{/if}
+										</td>
+										<td data-label="Timestamp">
+											{#if value?.found}
+												{new Date(value.timestamp).toLocaleString()}
+											{:else}
+												-
+											{/if}
+										</td>
+										<td data-label="Age">
+											{#if value?.found}
+												{formatTimeAgo(value.timestamp)}
+											{:else}
+												-
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							{/if}
 						</tbody>
 					</table>
 				</div>
@@ -1600,6 +1655,36 @@
 
 	th button span {
 		@apply font-bold text-lg leading-none;
+	}
+
+	/* Responsive table styles */
+	@media (max-width: 640px) {
+		.table-container table {
+			@apply w-full;
+		}
+
+		.table-container th,
+		.table-container td {
+			@apply block w-full;
+		}
+
+		.table-container tr {
+			@apply block border-b border-surface-300 mb-4;
+		}
+
+		.table-container td {
+			@apply pl-[8rem] relative;
+		}
+
+		.table-container td::before {
+			content: attr(data-label);
+			@apply absolute left-4 font-semibold;
+		}
+
+		/* Hide table headers on mobile */
+		.table-container thead {
+			@apply hidden;
+		}
 	}
 </style>
 
