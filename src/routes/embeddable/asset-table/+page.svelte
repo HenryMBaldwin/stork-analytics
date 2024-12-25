@@ -7,6 +7,8 @@
 
 	// Search query
 	let searchQuery = '';
+	let lastHeight = 0;
+	let resizeTimeout: NodeJS.Timeout;
 
 	// Store for asset data
 	const assetStore = writable<[string, string][]>([]);
@@ -23,24 +25,31 @@
 		!searchQuery || plaintext.toLowerCase().includes(searchQuery.toLowerCase())
 	);
 
-	// Send height to parent window
+	// Send height to parent window with debouncing
 	function sendHeight() {
 		if (!browser) return;
-		const tableContainer = document.querySelector('.table-container');
-		if (!tableContainer) {
-			console.log('Table container not found');
-			return;
-		}
-		
-		const height = tableContainer.scrollHeight;
-		console.log('Sending height:', height + 32);
-		window.parent.postMessage({ type: 'resize', height: height + 32 }, '*');
+		clearTimeout(resizeTimeout);
+		resizeTimeout = setTimeout(() => {
+			const tableContainer = document.querySelector('.table-container');
+			if (!tableContainer) {
+				console.log('Table container not found');
+				return;
+			}
+			
+			const height = tableContainer.scrollHeight;
+			// Only send if height has actually changed
+			if (height !== lastHeight) {
+				console.log('Sending height:', height + 32);
+				window.parent.postMessage({ type: 'resize', height: height + 32 }, '*');
+				lastHeight = height;
+			}
+		}, 100);
 	}
 
 	// Update height when filtered results change
 	$: if (browser) {
 		filteredAssets;
-		setTimeout(sendHeight, 0);
+		sendHeight();
 	}
 
 	// Copy to clipboard function
@@ -58,7 +67,7 @@
 			if (event.data?.type === 'theme') {
 				console.log('Received theme update:', event.data.isDark);
 				document.documentElement.style.setProperty('--table-bg', event.data.isDark ? '#1e1e1e' : '#ffffff');
-				document.documentElement.style.setProperty('--table-border', event.data.isDark ? '#18181b' : '#6b7280');
+				document.documentElement.style.setProperty('--table-border', event.data.isDark ? '#3f3f46' : '#6b7280');
 				document.documentElement.style.setProperty('--table-header-bg', event.data.isDark ? '#27272a' : '#f3f4f6');
 				document.documentElement.style.setProperty('--table-row-bg', event.data.isDark ? '#27272a' : '#ffffff');
 				document.documentElement.style.setProperty('--table-alt-row-bg', event.data.isDark ? '#303034' : '#f9fafb');
@@ -70,11 +79,18 @@
 		// Request initial theme from parent
 		window.parent.postMessage({ type: 'requestTheme' }, '*');
 
-		// Set up resize observer
-		const resizeObserver = new ResizeObserver(sendHeight);
-		const tableContainer = document.querySelector('.table-container');
-		if (tableContainer) {
-			resizeObserver.observe(tableContainer);
+		// Set up resize observer for content changes only
+		const resizeObserver = new ResizeObserver((entries) => {
+			// Only trigger for actual content size changes
+			const entry = entries[0];
+			if (entry && entry.contentRect) {
+				sendHeight();
+			}
+		});
+		
+		const tableBody = document.querySelector('tbody');
+		if (tableBody) {
+			resizeObserver.observe(tableBody);
 		}
 
 		// Fetch assets
@@ -93,17 +109,17 @@
 		return () => {
 			window.removeEventListener('message', handleMessage);
 			resizeObserver.disconnect();
+			clearTimeout(resizeTimeout);
 		};
 	});
 </script>
 
-<div class="table-container p-4">
+<div class="table-container p-4 h-full">
 	<!-- Search Bar -->
 	<div class="card p-4 mb-4">
 		<input
 			type="text"
 			class="input w-full"
-			
 			placeholder="Search assets..."
 			bind:value={searchQuery}
 		/>
@@ -175,6 +191,10 @@
 	}
 
 	/* Table styles */
+	.table-container {
+		background-color: var(--table-bg);
+	}
+
 	.table {
 		@apply w-full border-collapse;
 		background-color: var(--table-bg);
