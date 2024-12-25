@@ -21,7 +21,7 @@
 	let showOnlyFound = true;  // Default to showing only found assets
 	let scanTxs = true;  // Default to scanning transactions
 	let scanAssets = true;  // Default to scanning assets
-	const assetValues: Writable<Map<string, { value: number; timestamp: number; found: boolean }>> = writable(new Map());
+	const assetValues: Writable<Map<string, { value: number; timestamp: number; found: boolean; failed?: boolean }>> = writable(new Map());
 	let scanningValues = false;
 	const scanProgress = writable('');
 	const sortState = writable({
@@ -431,6 +431,10 @@
 			if (scanTxs || scanAssets) {
 				progress = 'Fetching contract ABI...';
 				await fetchABI();
+				// Clear progress if we're only scanning assets
+				if (!scanTxs) {
+					progress = '';
+				}
 			}
 			
 			// Start scanning based on options
@@ -986,6 +990,18 @@
 								if (retryCount < MAX_RETRIES && !abortController?.signal.aborted) {
 									scanProgress.set(`Retry ${retryCount + 1}/${MAX_RETRIES} for ${name} (${retryProgress + 1}/${failedScans.length}) (${e?.message || 'Unknown error'})...`);
 									await new Promise(resolve => setTimeout(resolve, 1000));  // 1 second delay between retries
+								} else if (retryCount >= MAX_RETRIES) {
+									// Mark as failed after all retries are exhausted
+									assetValues.update(map => {
+										const newMap = new Map(map);
+										newMap.set(hash, {
+											value: 0,
+											timestamp: 0,
+											found: false,
+											failed: true
+										});
+										return newMap;
+									});
 								}
 							}
 						}
@@ -1020,9 +1036,9 @@
 					comparison = nameA.localeCompare(nameB);
 					break;
 				case 'status':
-					// Not scanned (-1), Not found (0), Found (1)
-					const statusA = !valueA ? -1 : (valueA.found ? 1 : 0);
-					const statusB = !valueB ? -1 : (valueB.found ? 1 : 0);
+					// Failed (-2), Not scanned (-1), Not found (0), Found (1)
+					const statusA = !valueA ? -1 : (valueA.failed ? -2 : (valueA.found ? 1 : 0));
+					const statusB = !valueB ? -1 : (valueB.failed ? -2 : (valueB.found ? 1 : 0));
 					comparison = statusA - statusB;
 					// If status is the same, sort by asset name
 					if (comparison === 0) {
@@ -1210,12 +1226,14 @@
 			<div class="flex items-center space-x-4">
 				<div class="spinner-border" role="status"></div>
 				<div class="space-y-1">
-					<div>{progress.startsWith('Found ') ? '✓' : '🔍'} {progress}</div>
+					{#if progress}
+						<div>{progress.startsWith('Found ') ? '✓' : '🔍'} {progress}</div>
+					{/if}
 					{#if progress.includes('Rate limited')}
 						<div class="text-warning-500">⚠️ Rate limit hit, slowing down requests...</div>
 					{/if}
 					{#if scanningValues && $scanProgress}
-						<div class="text-info-500">{$scanProgress.includes('Scanning values... ') ? '🔍' : '✓'} {$scanProgress}</div>
+						<div class="text-info-500">{$scanProgress.includes('Scanning values... ') || $scanProgress.includes('Retrying failed') ? '🔍' : '✓'} {$scanProgress}</div>
 					{/if}
 				</div>
 			</div>
@@ -1252,7 +1270,7 @@
 	</TabGroup>
 	
 	{#if currentView === 'transactions'}
-		{#if !loading && $transactionStore.length === 0 && !error}
+		{#if $transactionStore.length === 0 && !error}
 			<div class="card p-4">
 				<div class="text-center text-gray-500">
 					No transactions found for {currentChainName || 'this contract'}.
@@ -1603,6 +1621,8 @@
 												<span class="badge variant-ghost">Not Scanned</span>
 											{:else if value.found}
 												<span class="badge variant-filled-success">✓ Found</span>
+											{:else if value.failed}
+												<span class="badge variant-filled-warning">⚠ Failed</span>
 											{:else}
 												<span class="badge variant-filled-error">✗ Not Found</span>
 											{/if}
