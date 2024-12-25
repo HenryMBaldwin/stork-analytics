@@ -11,6 +11,12 @@
 	// Store for asset data
 	const assetStore = writable<[string, string][]>([]);
 
+	// Format encoded ID to show first 6 and last 4 chars
+	function formatEncodedId(encoded: string) {
+		if (encoded.length <= 10) return encoded;
+		return `${encoded.slice(0, 6)}...${encoded.slice(-4)}`;
+	}
+
 	// Filtered assets
 	$: filteredAssets = $assetStore.filter(([plaintext]) => 
 		!searchQuery || plaintext.toLowerCase().includes(searchQuery.toLowerCase())
@@ -34,6 +40,15 @@
 	$: if (browser) {
 		filteredAssets;
 		setTimeout(sendHeight, 0);
+	}
+
+	// Copy to clipboard function
+	async function copyToClipboard(text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+		} catch (err) {
+			console.error('Failed to copy text: ', err);
+		}
 	}
 
 	// Fetch assets and set up resize observer
@@ -72,30 +87,49 @@
 	</div>
 
 	<!-- Results Table -->
-	<table class="table table-compact w-full">
-		<thead>
-			<tr>
-				<th>Asset ID</th>
-				<th>Encoded ID</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#if filteredAssets.length === 0}
+	<div class="overflow-x-auto">
+		<table class="table table-compact w-full">
+			<thead>
 				<tr>
-					<td colspan="2" class="text-center text-gray-500 py-4">
-						No assets{searchQuery ? ' matching search' : ''}.
-					</td>
+					<th class="w-[200px] min-w-[200px]">Asset ID</th>
+					<th>Encoded ID</th>
 				</tr>
-			{:else}
-				{#each filteredAssets as [plaintext, encoded]}
+			</thead>
+			<tbody>
+				{#if filteredAssets.length === 0}
 					<tr>
-						<td data-label="Asset ID">{plaintext}</td>
-						<td data-label="Encoded ID" class="font-mono text-sm break-all">{encoded}</td>
+						<td colspan="2" class="text-center text-gray-500 py-4">
+							No assets{searchQuery ? ' matching search' : ''}.
+						</td>
 					</tr>
-				{/each}
-			{/if}
-		</tbody>
-	</table>
+				{:else}
+					{#each filteredAssets as [plaintext, encoded]}
+						<tr>
+							<td class="truncate">{plaintext}</td>
+							<td class="font-mono text-sm encoded-cell" title={encoded}>
+								<div class="flex items-center gap-2">
+									<div class="min-w-0 flex-1">
+										<span class="full-id block truncate">{encoded}</span>
+										<span class="short-id block truncate">{formatEncodedId(encoded)}</span>
+									</div>
+									<button
+										class="copy-button flex-none"
+										on:click={() => copyToClipboard(encoded)}
+										title="Copy encoded ID"
+									>
+										<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+											<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+											<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+										</svg>
+									</button>
+								</div>
+							</td>
+						</tr>
+					{/each}
+				{/if}
+			</tbody>
+		</table>
+	</div>
 </div>
 
 <style>
@@ -113,6 +147,28 @@
 	.table td {
 		@apply border border-secondary-500 p-2;
 		@apply text-left;
+		@apply whitespace-nowrap;
+	}
+
+	.encoded-cell {
+		position: relative;
+	}
+
+	.encoded-cell .short-id {
+		display: none;
+	}
+
+	.encoded-cell .full-id {
+		display: block;
+	}
+
+	@media (max-width: 800px) {
+		.encoded-cell .short-id {
+			display: block;
+		}
+		.encoded-cell .full-id {
+			display: none;
+		}
 	}
 
 	.card {
@@ -139,36 +195,29 @@
 		@apply border-primary-900;
 	}
 
-	/* Responsive table styles */
-	@media (max-width: 640px) {
-		.table {
-			@apply w-full;
-		}
+	.copy-button {
+		@apply opacity-50 hover:opacity-100 transition-opacity;
+		@apply p-1 rounded hover:bg-surface-500/20;
+	}
 
-		.table th,
-		.table td {
-			@apply block w-full;
-		}
+	.encoded-cell div {
+		@apply w-full;
+	}
 
-		.table tr {
-			@apply block border-b border-secondary-500 mb-4;
-		}
+	.encoded-cell .short-id {
+		display: none;
+	}
 
-		:global(.dark) .table tr {
-			@apply border-primary-900;
-		}
+	.encoded-cell .full-id {
+		display: block;
+	}
 
-		.table td {
-			@apply pl-[8rem] relative;
+	@media (max-width: 800px) {
+		.encoded-cell .short-id {
+			display: block;
 		}
-
-		.table td::before {
-			content: attr(data-label);
-			@apply absolute left-4 font-semibold;
-		}
-
-		.table thead {
-			@apply hidden;
+		.encoded-cell .full-id {
+			display: none;
 		}
 	}
 </style> 
