@@ -1176,7 +1176,7 @@
 					placeholder="0x..."
 					required
 				/>
-			</div>
+</div>
 
 			<div class="flex flex-row gap-2">
 				<label class="flex items-center gap-2">
