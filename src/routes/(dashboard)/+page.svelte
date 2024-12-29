@@ -104,49 +104,31 @@
 	// Selected timeframe for frequency calculation
 	let selectedTimeframe: 'day' | 'week' | 'month' | 'year' | 'all' = 'day';
 
-	// Fetch ABI from Arbitrum Sepolia implementation contract
+	// Fetch ABI from GitHub repository
 	async function fetchABI() {
 		try {
-			// First get the implementation address from the known proxy on Arbitrum Sepolia
-			const ARBITRUM_PROXY = '0x7Bb9740FdcbD91866CaFEd099C36445Ea8140627';
-			const provider = new ethers.JsonRpcProvider('https://sepolia-rollup.arbitrum.io/rpc');
+			const response = await fetch('https://raw.githubusercontent.com/Stork-Oracle/stork-external/main/contracts/evm/stork.abi');
+			const abiJson = await response.json();
 			
-			// ERC1967 implementation slot
-			const implementationSlot = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
-			const implementationBytes = await provider.getStorage(ARBITRUM_PROXY, implementationSlot);
-			const implementationAddress = '0x' + implementationBytes.slice(-40); // last 20 bytes
+			console.log('Got ABI from GitHub');
 			
-			console.log('Found implementation address:', implementationAddress);
+			// Also log function signatures
+			const funcSigs = abiJson
+				.filter((item: any) => item.type === 'function')
+				.map((func: any) => `${func.name}(${func.inputs.map((i: any) => i.type).join(',')})`);
+			console.log('Available functions:', funcSigs);
 			
-			// Get the ABI from the implementation contract
-			const response = await fetch(`https://api-sepolia.arbiscan.io/api?module=contract&action=getabi&address=${implementationAddress}`);
-			const data = await response.json();
+			contractInterface = new ethers.Interface(abiJson);
 			
-			if (data.status === '1' && data.result) {
-				console.log('Got ABI from implementation contract');
-				const abiJson = JSON.parse(data.result);
-				
-				// Also log function signatures
-				const funcSigs = abiJson
-					.filter((item: any) => item.type === 'function')
-					.map((func: any) => `${func.name}(${func.inputs.map((i: any) => i.type).join(',')})`);
-				console.log('Available functions:', funcSigs);
-				
-				contractInterface = new ethers.Interface(abiJson);
-				
-				// Try to get the selector we're looking for
-				try {
-					const updateFunc = contractInterface.getFunction('updateTemporalNumericValuesV1');
-					console.log('Update function selector:', updateFunc?.selector);
-				} catch (e) {
-					console.warn('Could not find updateTemporalNumericValuesV1 function');
-				}
-				
-				return true;
-			} else {
-				console.warn('Failed to get implementation ABI:', data);
-				return false;
+			// Try to get the selector we're looking for
+			try {
+				const updateFunc = contractInterface.getFunction('updateTemporalNumericValuesV1');
+				console.log('Update function selector:', updateFunc?.selector);
+			} catch (e) {
+				console.warn('Could not find updateTemporalNumericValuesV1 function');
 			}
+			
+			return true;
 		} catch (e) {
 			console.error('Error fetching ABI:', e);
 			return false;

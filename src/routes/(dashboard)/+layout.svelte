@@ -8,8 +8,9 @@
 	<svelte:fragment slot="header">
 		<AppBar class="px-4 sm:px-8">
 			<svelte:fragment slot="lead">
-				<div class="flex items-center gap-4">
-					<strong class="text-xl uppercase tracking-wide">Stork</strong>
+				<div class="flex items-center gap-y-4 gap-x-2">
+					<img src="/stork-dark-on-light.png" alt="Stork" class="h-12 w-12" />
+					<span class="text-xl font-serif hidden md:block">Stork</span>
 				</div>
 			</svelte:fragment>
 			<svelte:fragment slot="default">
