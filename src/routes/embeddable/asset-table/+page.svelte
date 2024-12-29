@@ -1,4 +1,3 @@
-<!-- Create a standalone embeddable asset table -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { writable } from 'svelte/store';
