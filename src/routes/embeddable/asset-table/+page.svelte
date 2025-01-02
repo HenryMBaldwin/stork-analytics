@@ -100,7 +100,9 @@
 					id,
 					ethers.keccak256(ethers.toUtf8Bytes(id))
 				]);
-				assetStore.set(assetPairs);
+				if (assetPairs.length > 0) {
+					assetStore.set(assetPairs.sort((a: string[], b: string[]) => a[0].localeCompare(b[0])));
+				}
 				setTimeout(sendHeight, 100); // Longer delay for initial load
 			})
 			.catch(e => console.error('Error fetching asset IDs:', e));

@@ -20,6 +20,12 @@
 	import { computePosition, autoUpdate, flip, shift, offset, arrow } from '@floating-ui/dom';
 	import { storePopup } from '@skeletonlabs/skeleton';
 	storePopup.set({ computePosition, autoUpdate, flip, shift, offset, arrow });
+
+	import type { Config } from '@sveltejs/adapter-vercel';
+
+	export const config: Config = {
+		runtime: 'nodejs20.x'
+	};
 </script>
 
 <!-- App Shell -->
