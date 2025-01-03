@@ -779,7 +779,7 @@
 			const promises = [];
 			if (scanTxs) {
 				promises.push((async () => {
-					// ... rest of transaction refresh code ...
+				 	//TODO
 					return latestBlock;
 				})());
 			}
