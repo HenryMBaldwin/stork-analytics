@@ -126,6 +126,12 @@
 		/>
 	</div>
 
+	<!-- Total Assets Count -->
+	<div class="text-sm text-gray-500 mb-2 px-1">
+		{filteredAssets.length} {filteredAssets.length === 1 ? 'asset' : 'assets'}
+		{searchQuery ? ' found' : ' total'}
+	</div>
+
 	<!-- Results Table -->
 	<div class="overflow-x-auto">
 		<table class="table table-compact w-full">
